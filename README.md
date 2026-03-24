@@ -13,5 +13,5 @@ A JupyterLab extension for the ICOS Carbon Portal.
 ## Install
 
 ```bash
-pip install git+https://github.com/ZogopZ/icos-splash.git
+pip install git+https://github.com/ICOS-Carbon-Portal/jupyterlab-extensions.git
 ```
