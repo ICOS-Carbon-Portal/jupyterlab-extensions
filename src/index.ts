@@ -22,7 +22,7 @@ namespace CommandIDs {
 }
 
 const splash: JupyterFrontEndPlugin<ISplashScreen> = {
-  id: '@icos-splash',
+  id: '@icos-ext/splash',
   autoStart: true,
   provides: ISplashScreen,
   activate: (app: JupyterFrontEnd) => {
@@ -89,7 +89,10 @@ Would you like to clear the workspace or keep waiting?`,
         document.body.appendChild(splash);
         void recovery.invoke().catch(() => undefined);
         return new DisposableDelegate(async () => {
-          await restored;
+          const minDisplay = new Promise<void>(resolve =>
+            setTimeout(resolve, 1500)
+          );
+          await Promise.all([restored, minDisplay]);
           if (--splashCount === 0) {
             void recovery.stop();
             if (dialog) { dialog.dispose(); dialog = null; }
@@ -107,12 +110,12 @@ Would you like to clear the workspace or keep waiting?`,
 ------------------------------------------- */
 
 const sidebar: JupyterFrontEndPlugin<void> = {
-  id: '@icos-sidebar',
+  id: '@icos-ext/sidebar',
   autoStart: true,
   activate: () => {
 
     const cleanTabs = () => {
-      document.querySelectorAll("ul.lm-TabBar-content.p-TabBar-content li.lm-TabBar-tab")
+      document.querySelectorAll(".jp-SideBar.jp-mod-left ul.lm-TabBar-content li.lm-TabBar-tab")
         .forEach(tab => {
           const title = tab.getAttribute("title") || "";
           if (title.toLowerCase().includes("commands")) {
@@ -122,20 +125,20 @@ const sidebar: JupyterFrontEndPlugin<void> = {
     };
 
     const tryInject = () => {
-      const tabBar = document.querySelector("ul.lm-TabBar-content.p-TabBar-content");
+      const tabBar = document.querySelector(".jp-SideBar.jp-mod-left ul.lm-TabBar-content");
       if (!tabBar) return;
 
       tabBar.querySelectorAll("#icos-tab").forEach(el => el.remove());
 
       const tab = document.createElement("li");
-      tab.className = "lm-TabBar-tab p-TabBar-tab";
+      tab.className = "lm-TabBar-tab";
       tab.id = "icos-tab";
       tab.setAttribute("role", "tab");
       tab.style.cursor = "pointer";
       tab.title = "Open Hub";
 
       const label = document.createElement("div");
-      label.className = "p-TabBar-tabLabel";
+      label.className = "lm-TabBar-tabLabel";
       label.textContent = "ICOS HUB";
       label.style.display = "flex";
       label.style.alignItems = "center";
@@ -279,7 +282,7 @@ const sidebar: JupyterFrontEndPlugin<void> = {
       })();
 
       tab.addEventListener("click", () => {
-        window.open("https://exploredata.icos-cp.eu/hub/home");
+        window.open(window.location.origin + '/hub/home');
       });
 
       cleanTabs();

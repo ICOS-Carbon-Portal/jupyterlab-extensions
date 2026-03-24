@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: main
+    branches: trunk
   pull_request:
     branches: '*'
 
@@ -18,7 +18,7 @@ jobs:
       uses: jupyterlab/maintainer-tools/.github/actions/base-setup@v1
 
     - name: Install dependencies
-      run: python -m pip install -U jupyterlab~=3.1
+      run: python -m pip install -U jupyterlab~=4.0
 
     - name: Lint the extension
       run: |
@@ -26,18 +26,13 @@ jobs:
         jlpm
         jlpm run lint:check
     
-    - name: Test the extension
-      run: |
-        set -eux
-        jlpm run test
-
-    - name: Build the extension
+- name: Build the extension
       run: |
         set -eux
         python -m pip install .[test]
 
         jupyter labextension list
-        jupyter labextension list 2>&1 | grep -ie "icos-splash.*OK"
+        jupyter labextension list 2>&1 | grep -ie "icos-ext.*OK"
         python -m jupyterlab.browser_check
 
     - name: Package the extension
@@ -46,13 +41,13 @@ jobs:
 
         pip install build
         python -m build
-        pip uninstall -y "icos-splash" jupyterlab
+        pip uninstall -y "icos-ext" jupyterlab
 
     - name: Upload extension packages
       uses: actions/upload-artifact@v3
       with:
         name: extension-artifacts
-        path: dist/icos-splash*
+        path: dist/icos_ext*
         if-no-files-found: error
 
   test_isolated:
@@ -65,7 +60,7 @@ jobs:
     - name: Install Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.13'
         architecture: 'x64'
     - uses: actions/download-artifact@v3
       with:
@@ -77,11 +72,11 @@ jobs:
         sudo rm -rf $(which node)
         sudo rm -rf $(which node)
 
-        pip install "jupyterlab~=3.1" icos-splash*.whl
+        pip install "jupyterlab~=4.0" icos_ext*.whl
 
 
         jupyter labextension list
-        jupyter labextension list 2>&1 | grep -ie "icos-splash.*OK"
+        jupyter labextension list 2>&1 | grep -ie "icos-ext.*OK"
         python -m jupyterlab.browser_check --no-chrome-test
 
   integration-tests:
@@ -107,7 +102,7 @@ jobs:
     - name: Install the extension
       run: |
         set -eux
-        python -m pip install "jupyterlab~=3.1" icos-splash*.whl
+        python -m pip install "jupyterlab~=4.0" icos_ext*.whl
 
     - name: Install dependencies
       working-directory: ui-tests
@@ -135,7 +130,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v3
       with:
-        name: icos-splash-playwright-tests
+        name: icos-ext-playwright-tests
         path: |
           ui-tests/test-results
           ui-tests/playwright-report

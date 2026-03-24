@@ -1,16 +1,12 @@
 {
-    "name": "icosSplash",
-    "version": "0.1.0",
-    "description": "A JupyterLab extension that changes the standard jupyter lab splash animation to the ICOS animation.",
+    "name": "icos-ext",
+    "version": "0.2.0",
+    "description": "A JupyterLab extension providing ICOS Carbon Portal branding: custom splash screen and Hub navigation sidebar button.",
     "keywords": [
         "jupyter",
         "jupyterlab",
         "jupyterlab-extension"
     ],
-    "homepage": "",
-    "bugs": {
-        "url": "/issues"
-    },
     "license": "BSD-3-Clause",
     "author": {
         "name": "Zois Zogopoulos",
@@ -39,7 +35,7 @@
         "clean": "jlpm clean:lib",
         "clean:lib": "rimraf lib tsconfig.tsbuildinfo",
         "clean:lintcache": "rimraf .eslintcache .stylelintcache",
-        "clean:labextension": "rimraf icos_splash/labextension icos_splash/_version.py",
+        "clean:labextension": "rimraf icos_ext/labextension icos_ext/_version.py",
         "clean:all": "jlpm clean:lib && jlpm clean:labextension && jlpm clean:lintcache",
         "eslint": "jlpm eslint:check --fix",
         "eslint:check": "eslint . --cache --ext .ts,.tsx",
@@ -51,7 +47,7 @@
         "prettier:check": "jlpm prettier:base --check",
         "stylelint": "jlpm stylelint:check --fix",
         "stylelint:check": "stylelint --cache \"style/**/*.css\"",
-        "watch": "run-p watch:src watch:labextension",
+"watch": "run-p watch:src watch:labextension",
         "watch:src": "tsc -w --sourceMap",
         "watch:labextension": "jupyter labextension watch ."
     },
@@ -88,20 +84,25 @@
         "style/index.js"
     ],
     "styleModule": "style/index.js",
-    "publishConfig": {
-        "access": "public"
-    },
     "jupyterlab": {
         "extension": true,
-        "outputDir": "icos_splash/labextension",
+        "outputDir": "icos_ext/labextension",
         "schemaDir": "schema"
     },
-    "eslintIgnore": [
-        "node_modules",
-        "dist",
-        "coverage",
-        "**/*.d.ts"
-    ],
+    "prettier": {
+        "singleQuote": true,
+        "trailingComma": "none",
+        "arrowParens": "avoid",
+        "endOfLine": "auto",
+        "overrides": [
+            {
+                "files": "package.json",
+                "options": {
+                    "tabWidth": 4
+                }
+            }
+        ]
+    },
     "eslintConfig": {
         "extends": [
             "eslint:recommended",
@@ -122,53 +123,27 @@
                 "error",
                 {
                     "selector": "interface",
-                    "format": [
-                        "PascalCase"
-                    ],
+                    "format": ["PascalCase"],
                     "custom": {
                         "regex": "^I[A-Z]",
                         "match": true
                     }
                 }
             ],
-            "@typescript-eslint/no-unused-vars": [
-                "warn",
-                {
-                    "args": "none"
-                }
-            ],
+            "@typescript-eslint/no-unused-vars": ["warn", { "args": "none" }],
             "@typescript-eslint/no-explicit-any": "off",
             "@typescript-eslint/no-namespace": "off",
             "@typescript-eslint/no-use-before-define": "off",
             "@typescript-eslint/quotes": [
                 "error",
                 "single",
-                {
-                    "avoidEscape": true,
-                    "allowTemplateLiterals": false
-                }
+                { "avoidEscape": true, "allowTemplateLiterals": false }
             ],
-            "curly": [
-                "error",
-                "all"
-            ],
+            "curly": ["error", "all"],
             "eqeqeq": "error",
             "prefer-arrow-callback": "error"
-        }
-    },
-    "prettier": {
-        "singleQuote": true,
-        "trailingComma": "none",
-        "arrowParens": "avoid",
-        "endOfLine": "auto",
-        "overrides": [
-            {
-                "files": "package.json",
-                "options": {
-                    "tabWidth": 4
-                }
-            }
-        ]
+        },
+        "ignorePatterns": ["dist", "coverage", "**/*.d.ts", "**/__tests__", "ui-tests"]
     },
     "stylelint": {
         "extends": [

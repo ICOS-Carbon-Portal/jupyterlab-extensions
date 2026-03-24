@@ -1,7 +1,7 @@
 {
   "jupyter.lab.shortcuts": [],
-  "title": "icosSplash",
-  "description": "icosSplash settings.",
+  "title": "icos-ext",
+  "description": "icos-ext settings.",
   "type": "object",
   "properties": {},
   "additionalProperties": false

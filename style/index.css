@@ -50,8 +50,8 @@
   display: inline-block;
   background-color: white;
   animation-name: circle-1-animation;
-  animation-delay: 0.2s;
-  animation-duration: 2s;
+  animation-delay: 0.1s;
+  animation-duration: 0.8s;
   animation-iteration-count: infinite;
   }
 
@@ -67,8 +67,8 @@
   display: inline-block;
   background-color: white;
   animation-name: circle-2-animation;
-  animation-delay: 0.4s;
-  animation-duration: 2s;
+  animation-delay: 0.2s;
+  animation-duration: 0.8s;
   animation-iteration-count: infinite;
   margin-left: 5px;
 }
@@ -85,8 +85,8 @@
   display: inline-block;
   background-color: white;
   animation-name: circle-3-animation;
-  animation-delay: 0.6s;
-  animation-duration: 2s;
+  animation-delay: 0.3s;
+  animation-duration: 0.8s;
   animation-iteration-count: infinite;
   margin-left: 5px;
 }
