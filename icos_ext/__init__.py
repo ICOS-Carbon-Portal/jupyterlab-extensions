@@ -14,3 +14,12 @@ def _jupyter_labextension_paths():
         "src": "labextension",
         "dest": "icos-ext"
     }]
+
+
+def _jupyter_server_extension_points():
+    return [{"module": "icos_ext"}]
+
+
+def _load_jupyter_server_extension(server_app):
+    from .handlers import setup_handlers
+    setup_handlers(server_app.web_app)

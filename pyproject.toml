@@ -24,6 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
+    "jupyter_server>=2.0.0",
 ]
 dynamic = ["version", "description", "authors", "urls", "keywords"]
 
@@ -40,6 +41,10 @@ exclude = [".github", "binder"]
 [tool.hatch.build.targets.wheel.shared-data]
 "icos_ext/labextension" = "share/jupyter/labextensions/icos-ext"
 "install.json" = "share/jupyter/labextensions/icos-ext/install.json"
+"jupyter-config/jupyter_server_config.d/icos-ext.json" = "etc/jupyter/jupyter_server_config.d/icos-ext.json"
+
+[project.entry-points."jupyter_server.extension"]
+icos_ext = "icos_ext"
 
 [tool.hatch.build.hooks.version]
 path = "icos_ext/_version.py"

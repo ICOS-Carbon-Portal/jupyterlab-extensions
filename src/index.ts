@@ -6,6 +6,9 @@ import {
 import { Dialog, ISplashScreen } from '@jupyterlab/apputils';
 import { Throttler } from '@lumino/polling';
 import { DisposableDelegate } from '@lumino/disposable';
+import { INotebookTracker, NotebookActions } from '@jupyterlab/notebook';
+import { PageConfig } from '@jupyterlab/coreutils';
+import { ServerConnection } from '@jupyterlab/services';
 
 /* ------------------------------------------
    Splash Screen
@@ -297,4 +300,33 @@ const sidebar: JupyterFrontEndPlugin<void> = {
 };
 
 
-export default [splash, sidebar];
+/* ------------------------------------------
+   Cell Execution Tracker
+------------------------------------------- */
+
+const tracker: JupyterFrontEndPlugin<void> = {
+  id: '@icos-ext/tracker',
+  autoStart: true,
+  requires: [INotebookTracker],
+  activate: (app: JupyterFrontEnd, notebooks: INotebookTracker) => {
+    NotebookActions.executed.connect((_, args) => {
+      const panel = notebooks.find(p => p.content === args.notebook);
+      if (!panel) {
+        return;
+      }
+      const notebookPath = panel.context.path;
+      const username = PageConfig.getOption('hubUser') || '';
+      const settings = ServerConnection.makeSettings();
+      ServerConnection.makeRequest(
+        PageConfig.getBaseUrl() + 'icos-ext/track',
+        {
+          method: 'POST',
+          body: JSON.stringify({ notebook: notebookPath, username, url: window.location.href })
+        },
+        settings
+      ).catch(() => undefined);
+    });
+  }
+};
+
+export default [splash, sidebar, tracker];
