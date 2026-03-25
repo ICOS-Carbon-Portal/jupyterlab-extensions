@@ -4,11 +4,13 @@ A JupyterLab extension for the ICOS Carbon Portal.
 
 - Custom ICOS Carbon Portal splash screen on JupyterLab startup
 - "ICOS HUB" sidebar button that opens the ICOS Carbon Portal Hub
+- Notebook execution tracking — sends analytics to Matomo on every cell run
 
 ## Requirements
 
 - JupyterLab >= 4.0
 - Python >= 3.8
+- `jupyter_server` >= 2.0
 
 ## Install
 
