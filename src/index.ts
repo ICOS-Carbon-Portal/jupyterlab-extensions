@@ -115,7 +115,7 @@ Would you like to clear the workspace or keep waiting?`,
 const sidebar: JupyterFrontEndPlugin<void> = {
   id: '@icos-ext/sidebar',
   autoStart: true,
-  activate: () => {
+  activate: (app: JupyterFrontEnd) => {
 
     const cleanTabs = () => {
       document.querySelectorAll(".jp-SideBar.jp-mod-left ul.lm-TabBar-content li.lm-TabBar-tab")
@@ -127,9 +127,9 @@ const sidebar: JupyterFrontEndPlugin<void> = {
         });
     };
 
-    const tryInject = () => {
+    const tryInject = (): boolean => {
       const tabBar = document.querySelector(".jp-SideBar.jp-mod-left ul.lm-TabBar-content");
-      if (!tabBar) return;
+      if (!tabBar) return false;
 
       tabBar.querySelectorAll("#icos-tab").forEach(el => el.remove());
 
@@ -153,19 +153,20 @@ const sidebar: JupyterFrontEndPlugin<void> = {
       label.style.padding = "0 4px";
       tab.appendChild(label);
       tabBar.appendChild(tab);
+      tab.classList.add("icos-tab-highlight");
+      tab.addEventListener("animationend", () => tab.classList.remove("icos-tab-highlight"), { once: true });
 
       /* ---------------- Pinned Popup ---------------- */
+      const isExplore = window.location.hostname.includes("exploredata") || window.location.hostname.includes("exploretest");
+      const hubContent = isExplore
+        ? `<div style="font-weight:600; margin-bottom:3px;">Click here to return to environment selection:</div>
+           <div style="font-size:10px; opacity:0.85;">⏹ <strong>Stop My Server</strong> → ▶ <strong>Start My Server</strong></div>`
+        : `<div style="font-weight:600;">Click here to manage your environment.</div>`;
+
       (function () {
         const popup = document.createElement("div");
         popup.id = "icos-pinned-popup";
-        popup.innerHTML = `
-          <div style="font-weight:600; margin-bottom:3px;">
-            Click here to return to environment selection:
-          </div>
-          <div style="font-size:10px; opacity:0.85;">
-            ⏹ <strong>Stop My Server</strong> → ▶ <strong>Start My Server</strong>
-          </div>
-        `;
+        popup.innerHTML = hubContent;
         Object.assign(popup.style, {
           position: "fixed",
           fontSize: "11px",
@@ -180,6 +181,7 @@ const sidebar: JupyterFrontEndPlugin<void> = {
           maxWidth: "210px",
           cursor: "default"
         });
+        popup.style.display = "none";
 
         const arrow = document.createElement("div");
         Object.assign(arrow.style, {
@@ -204,33 +206,40 @@ const sidebar: JupyterFrontEndPlugin<void> = {
           arrow.style.left = "-6px";
         };
 
-        setTimeout(positionPopup, 0);
         window.addEventListener("resize", positionPopup);
         window.addEventListener("scroll", positionPopup);
 
-        popup.addEventListener("click", () => popup.style.display = "none");
+        const revealPopup = () => {
+          popup.classList.add("icos-popup-live");
+          popup.style.display = "";
+          positionPopup();
+          popup.addEventListener("click", () => { popup.style.display = "none"; });
+          let popupTimeout = setTimeout(() => { popup.style.display = "none"; }, 3000);
+          popup.addEventListener("mouseenter", () => clearTimeout(popupTimeout));
+          popup.addEventListener("mouseleave", () => {
+            if (popup.style.display !== "none") {
+              popupTimeout = setTimeout(() => { popup.style.display = "none"; }, 1500);
+            }
+          });
+        };
 
-        let popupTimeout = setTimeout(() => popup.style.display = "none", 3000);
-
-        popup.addEventListener("mouseenter", () => clearTimeout(popupTimeout));
-        popup.addEventListener("mouseleave", () => {
-          if (popup.style.display !== "none") {
-            popupTimeout = setTimeout(() => popup.style.display = "none", 1500);
-          }
-        });
+        if (!document.getElementById("icos-splash")) {
+          revealPopup();
+        } else {
+          const obs = new MutationObserver(() => {
+            if (!document.getElementById("icos-splash")) {
+              obs.disconnect();
+              revealPopup();
+            }
+          });
+          obs.observe(document.body, { childList: true });
+        }
       })();
 
       /* ---------------- Tooltip ---------------- */
       (function () {
         const tooltip = document.createElement("div");
-        tooltip.innerHTML = `
-          <div style="font-weight:600; margin-bottom:3px;">
-            Click here to return to environment selection:
-          </div>
-          <div style="font-size:10px; opacity:0.85;">
-            ⏹ <strong>Stop My Server</strong> → ▶ <strong>Start My Server</strong>
-          </div>
-        `;
+        tooltip.innerHTML = hubContent;
         Object.assign(tooltip.style, {
           position: "fixed",
           fontSize: "11px",
@@ -289,13 +298,16 @@ const sidebar: JupyterFrontEndPlugin<void> = {
       });
 
       cleanTabs();
+      return true;
     };
 
-    let t = setInterval(() => {
-      tryInject();
-      cleanTabs();
-      if (document.getElementById("icos-tab")) clearInterval(t);
-    }, 400);
+    void app.restored.then(() => {
+      if (!tryInject()) {
+        const t = setInterval(() => {
+          if (tryInject()) clearInterval(t);
+        }, 100);
+      }
+    });
   }
 };
 
