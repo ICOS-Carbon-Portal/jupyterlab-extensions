@@ -212,7 +212,7 @@ const sidebar: JupyterFrontEndPlugin<void> = {
         const revealPopup = () => {
           popup.classList.add("icos-popup-live");
           popup.style.display = "";
-          positionPopup();
+          requestAnimationFrame(() => requestAnimationFrame(() => positionPopup()));
           popup.addEventListener("click", () => { popup.style.display = "none"; });
           let popupTimeout = setTimeout(() => { popup.style.display = "none"; }, 3000);
           popup.addEventListener("mouseenter", () => clearTimeout(popupTimeout));
