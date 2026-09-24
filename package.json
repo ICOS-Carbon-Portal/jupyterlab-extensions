@@ -47,16 +47,19 @@
         "prettier:check": "jlpm prettier:base --check",
         "stylelint": "jlpm stylelint:check --fix",
         "stylelint:check": "stylelint --cache \"style/**/*.css\"",
-"watch": "run-p watch:src watch:labextension",
+        "watch": "run-p watch:src watch:labextension",
         "watch:src": "tsc -w --sourceMap",
         "watch:labextension": "jupyter labextension watch ."
     },
     "dependencies": {
         "@jupyterlab/application": "^4.0.0",
         "@jupyterlab/coreutils": "^6.0.0",
+        "@jupyterlab/filebrowser": "^4.0.0",
+        "@jupyterlab/mainmenu": "^4.0.0",
         "@jupyterlab/notebook": "^4.0.0",
         "@jupyterlab/services": "^7.0.0",
-        "@jupyterlab/settingregistry": "^4.0.0"
+        "@jupyterlab/settingregistry": "^4.0.0",
+        "@lumino/widgets": "^2.5.0"
     },
     "devDependencies": {
         "@jupyterlab/builder": "^4.0.0",
@@ -88,7 +91,9 @@
     ],
     "styleModule": "style/index.js",
     "resolutions": {
-        "@lumino/coreutils": "2.2.0"
+        "@lumino/coreutils": "2.2.0",
+        "@lumino/commands": "2.3.1",
+        "@lumino/widgets": "2.5.0"
     },
     "jupyterlab": {
         "extension": true,
@@ -129,27 +134,46 @@
                 "error",
                 {
                     "selector": "interface",
-                    "format": ["PascalCase"],
+                    "format": [
+                        "PascalCase"
+                    ],
                     "custom": {
                         "regex": "^I[A-Z]",
                         "match": true
                     }
                 }
             ],
-            "@typescript-eslint/no-unused-vars": ["warn", { "args": "none" }],
+            "@typescript-eslint/no-unused-vars": [
+                "warn",
+                {
+                    "args": "none"
+                }
+            ],
             "@typescript-eslint/no-explicit-any": "off",
             "@typescript-eslint/no-namespace": "off",
             "@typescript-eslint/no-use-before-define": "off",
             "@typescript-eslint/quotes": [
                 "error",
                 "single",
-                { "avoidEscape": true, "allowTemplateLiterals": false }
+                {
+                    "avoidEscape": true,
+                    "allowTemplateLiterals": false
+                }
             ],
-            "curly": ["error", "all"],
+            "curly": [
+                "error",
+                "all"
+            ],
             "eqeqeq": "error",
             "prefer-arrow-callback": "error"
         },
-        "ignorePatterns": ["dist", "coverage", "**/*.d.ts", "**/__tests__", "ui-tests"]
+        "ignorePatterns": [
+            "dist",
+            "coverage",
+            "**/*.d.ts",
+            "**/__tests__",
+            "ui-tests"
+        ]
     },
     "stylelint": {
         "extends": [
