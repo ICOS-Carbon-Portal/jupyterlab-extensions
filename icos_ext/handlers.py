@@ -15,7 +15,6 @@ from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
 from tornado import web
 from tornado.httpclient import AsyncHTTPClient
-from tornado.ioloop import IOLoop
 
 # The scan itself lives in baseline.py, which the image build also runs
 # on its own to record what it ships. Both sides must see a package the
@@ -107,27 +106,6 @@ BUNDLE_COMPOSE_TOKEN = "frozen"
 # frozen copy has to land somewhere else — otherwise the container
 # cannot bind. The container side stays 8888.
 BUNDLE_COMPOSE_PORT = 8899
-
-# The build endpoint is off unless this is exactly "1"; see BuildHandler
-# for why the gate is deliberate. The socket is named only in the error
-# text, so a developer knows what to mount.
-BUILD_ENV_VAR = "ICOS_FREEZE_DOCKER"
-DOCKER_SOCKET = "/var/run/docker.sock"
-
-# A docker build writes thousands of lines. The response carries the end
-# of the log, which is where the failure is, not the whole of it.
-BUILD_LOG_TAIL_LINES = 40
-
-# A conservative subset of what Docker accepts as a reference: lowercase
-# path components separated by "/", each of them alphanumeric runs
-# joined by ".", "_" or "-", with an optional ":tag". Narrower than the
-# daemon's own grammar on purpose — a client-supplied tag reaches the
-# daemon, so anything we cannot read plainly is refused.
-DOCKER_REFERENCE_RE = re.compile(
-    r"^[a-z0-9]+(?:[._-][a-z0-9]+)*"
-    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*"
-    r"(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$"
-)
 
 # Everything a generated slug may not contain. Runs of it collapse to a
 # single underscore, so a directory name arrives as snake case and the
@@ -1339,55 +1317,6 @@ def _write_build_context(directory, dockerfile, image, snapshot, overwrite=False
     }
 
 
-def _has_generated_dockerfile(directory):
-    """Return True when *directory* holds a Dockerfile this extension wrote.
-
-    The build endpoint refuses anything else. The context it would send
-    is whatever happens to be in the directory, and a Dockerfile nobody
-    froze is not a frozen environment.
-    """
-    try:
-        content = (directory / DOCKERFILE_NAME).read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return False
-    except (OSError, ValueError) as e:
-        log.warning("Freeze: cannot read %s: %s", DOCKERFILE_NAME, e)
-        return False
-
-    return content.startswith(DOCKERFILE_HEADER)
-
-
-def _docker_sdk_available():
-    """Return True when the docker Python SDK can be imported.
-
-    The import is local rather than at module scope so the extension
-    stays importable without the optional dependency; after the first
-    call it costs a dictionary lookup in sys.modules.
-    """
-    try:
-        import docker  # noqa: F401
-    except ImportError:
-        return False
-
-    return True
-
-
-def _build_enabled():
-    """Return True when the build endpoint may talk to the Docker daemon.
-
-    The env gate and the SDK import, and deliberately no ping: this is
-    asked on every freeze, and a daemon that is up now may be down when
-    the build is actually requested, so there is nothing to gain from
-    paying for the round trip here. BuildHandler asks the same question,
-    so the button the frontend offers and the endpoint behind it cannot
-    disagree about whether building is possible.
-    """
-    if os.environ.get(BUILD_ENV_VAR) != "1":
-        return False
-
-    return _docker_sdk_available()
-
-
 def _directory_slug(directory):
     """Return *directory*'s name as a snake case slug.
 
@@ -1421,80 +1350,6 @@ def _generated_tag(directory):
     tag off the last.
     """
     return f"icos-frozen:{_directory_slug(directory)}_{_utc_stamp()}"
-
-
-def _build_tag(requested, directory):
-    """Return the tag to build under, validating a client-supplied one.
-
-    The tag reaches the Docker daemon, so it is matched against
-    DOCKER_REFERENCE_RE rather than passed through: a name we cannot
-    read plainly is a name we cannot reason about.
-    """
-    if isinstance(requested, str) and requested.strip():
-        tag = requested.strip()
-        if DOCKER_REFERENCE_RE.match(tag) is None:
-            log.warning("Freeze: rejected image tag: %r", requested)
-            raise web.HTTPError(400, "Requested tag is not a valid image name")
-        return tag
-
-    return _generated_tag(directory)
-
-
-def _build_image(client, directory, tag):
-    """Build *directory* into an image tagged *tag*; return the outcome.
-
-    {"image_id": ..., "error": ..., "log_tail": [...]}. This runs in a
-    worker thread (see BuildHandler.post), so a failed build comes back
-    as a value: raising here would surface far from the request that
-    caused it.
-
-    The low-level API is used because it yields the daemon's output
-    chunk by chunk, which is what makes the log available at all; the
-    high-level client would only hand back the finished image.
-    """
-    import docker
-
-    lines = []
-    image_id = None
-    error = None
-
-    try:
-        for chunk in client.api.build(
-            path=str(directory), tag=tag, rm=True, decode=True, pull=False
-        ):
-            if not isinstance(chunk, dict):
-                continue
-
-            if chunk.get("error"):
-                error = str(chunk["error"]).strip()
-                continue
-
-            stream = chunk.get("stream")
-            if isinstance(stream, str):
-                lines.extend(
-                    part.rstrip() for part in stream.splitlines() if part.strip()
-                )
-
-            aux = chunk.get("aux")
-            if isinstance(aux, dict) and aux.get("ID"):
-                image_id = aux["ID"]
-    except (docker.errors.DockerException, OSError) as e:
-        log.warning("Freeze: build of %s failed: %s", tag, e)
-        error = str(e)
-
-    if error is None and image_id is None:
-        # Older daemons send no "aux" chunk, so ask for the image we
-        # just tagged instead of reporting a build with no id.
-        try:
-            image_id = client.images.get(tag).id
-        except docker.errors.DockerException as e:
-            log.warning("Freeze: built %s but cannot read its id: %s", tag, e)
-
-    return {
-        "image_id": image_id,
-        "error": error,
-        "log_tail": lines[-BUILD_LOG_TAIL_LINES:],
-    }
 
 
 def _bundle_member_bytes(file_path):
@@ -1900,10 +1755,6 @@ class FreezeHandler(APIHandler):
             "dockerfile_written": written,
             "dockerignore_written": dockerignore_written,
             "manifest_written": manifest_written,
-            # Whether the frontend may offer to build this directory.
-            # False whenever the Dockerfile was blocked, because there
-            # would be no context to build.
-            "build_available": dockerfile is not None and _build_enabled(),
             # Whether the frontend may offer the handover package. The
             # bundle endpoint refuses exactly when the Dockerfile was
             # blocked, so there is nothing else to ask.
@@ -1986,130 +1837,6 @@ class DockerfileHandler(APIHandler):
         }))
 
 
-class BuildHandler(APIHandler):
-    """Builds a frozen directory into a local Docker image.
-
-    Disabled unless ICOS_FREEZE_DOCKER is exactly "1". The build talks
-    to the host's Docker daemon through the socket mounted into this
-    container, and anyone who can reach that socket can start a
-    container with the host's filesystem in it: reaching the daemon is
-    being root on the host by another name. So the endpoint stays off
-    unless someone deliberately turns it on for local development, and
-    the switch is an environment variable of the server process --
-    nothing a request can set.
-
-    The directory must already hold a Dockerfile this extension
-    generated. The whole directory is sent to the daemon as the build
-    context, so building one nobody froze would ship whatever happened
-    to be lying in it.
-    """
-
-    @web.authenticated
-    async def post(self):
-        if os.environ.get(BUILD_ENV_VAR) != "1":
-            self.set_status(409)
-            self.finish(json.dumps({
-                "status": "disabled",
-                "reason": (
-                    f"Building images is switched off. Set {BUILD_ENV_VAR}=1 "
-                    "on the Jupyter server to enable it."
-                ),
-            }))
-            return
-
-        try:
-            body = json.loads(self.request.body)
-        except ValueError:
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
-
-        path = body.get("path")
-        if not isinstance(path, str):
-            path = ""
-
-        # The snapshot is collected from the directory itself, so the
-        # build is refused for the same reasons a freeze would be.
-        snapshot = _freeze_snapshot(self, path)
-        directory = snapshot["directory"]
-
-        image = _session_image()
-        blocked = _dockerfile_block_reason(
-            image, snapshot["conflicts"], snapshot["notebook_installs"]
-        )
-        if blocked is not None:
-            self.set_status(409)
-            self.finish(json.dumps({"status": "blocked", "reason": blocked}))
-            return
-
-        if not _has_generated_dockerfile(directory):
-            self.set_status(409)
-            self.finish(json.dumps({
-                "status": "no_context",
-                "reason": (
-                    "Freeze this directory first, so the Dockerfile and "
-                    ".dockerignore are in place."
-                ),
-            }))
-            return
-
-        try:
-            import docker
-        except ImportError:
-            self.set_status(409)
-            self.finish(json.dumps({
-                "status": "unavailable",
-                "reason": (
-                    "The docker Python SDK is not installed in this "
-                    "environment."
-                ),
-            }))
-            return
-
-        try:
-            client = docker.from_env()
-            client.ping()
-        except docker.errors.DockerException as e:
-            log.warning("Freeze: cannot reach the Docker daemon: %s", e)
-            self.set_status(409)
-            self.finish(json.dumps({
-                "status": "unavailable",
-                "reason": (
-                    f"Cannot reach the Docker daemon on {DOCKER_SOCKET}: {e}"
-                ),
-            }))
-            return
-
-        tag = _build_tag(body.get("tag"), directory)
-
-        # A docker build runs for minutes and the SDK call is blocking,
-        # so it goes to a worker thread. Running it inline would stop the
-        # Jupyter server answering anything at all — kernel traffic and
-        # every other notebook included — until the build finished.
-        result = await IOLoop.current().run_in_executor(
-            None, _build_image, client, directory, tag
-        )
-
-        if result["error"] is not None:
-            # The request was well formed and the server did its part;
-            # the build itself failed, which is the client's content to
-            # fix, not a server fault. 422 rather than 500.
-            self.set_status(422)
-            self.finish(json.dumps({
-                "status": "failed",
-                "reason": result["error"],
-                "log_tail": result["log_tail"],
-            }))
-            return
-
-        self.finish(json.dumps({
-            "status": "ok",
-            "tag": tag,
-            "image_id": result["image_id"],
-            "log_tail": result["log_tail"],
-        }))
-
-
 class BundleHandler(APIHandler):
     """Serves a frozen directory as a zip someone else can build and run.
 
@@ -2186,7 +1913,6 @@ def setup_handlers(web_app):
         (url_path_join(base_url, "icos-ext", "track"), TrackHandler),
         (url_path_join(base_url, "icos-ext", "freeze"), FreezeHandler),
         (url_path_join(base_url, "icos-ext", "dockerfile"), DockerfileHandler),
-        (url_path_join(base_url, "icos-ext", "build"), BuildHandler),
         (url_path_join(base_url, "icos-ext", "bundle"), BundleHandler),
     ]
     web_app.add_handlers(".*$", handlers)

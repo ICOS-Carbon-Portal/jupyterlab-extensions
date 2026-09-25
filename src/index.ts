@@ -415,16 +415,7 @@ const freeze: JupyterFrontEndPlugin<void> = {
       user_installed?: IFreezeEnvPackage[];
       missing?: string[];
       dockerfile_written?: string | null;
-      build_available?: boolean;
       bundle_available?: boolean;
-    }
-
-    interface IFreezeBuild {
-      status?: string;
-      tag?: string;
-      image_id?: string | null;
-      reason?: string;
-      log_tail?: string[];
     }
 
     interface IFreezeBundleBlocked {
@@ -439,9 +430,9 @@ const freeze: JupyterFrontEndPlugin<void> = {
         buttons: [Dialog.okButton()]
       });
 
-    // The freeze, the package and the build each report the same two
-    // failures in the same words — only the verb and the directory
-    // change — so that wording is written once here.
+    // The freeze and the package each report the same two failures in
+    // the same words — only the verb and the directory change — so that
+    // wording is written once here.
     const unreachableMessage = (verb: string, target: string) =>
       'Could not reach the server to ' +
       verb +
@@ -479,7 +470,7 @@ const freeze: JupyterFrontEndPlugin<void> = {
 
     // Returns null when the request never reached the server. Where
     // that gets reported is the caller's business: the freeze itself
-    // uses a dialog, the two buttons in the report write into their own
+    // uses a dialog, the button in the report writes into its own
     // status line.
     const freezeRequest = async (
       url: string,
@@ -1095,122 +1086,6 @@ const freeze: JupyterFrontEndPlugin<void> = {
           'No package can be made until the Dockerfile problem above is ' +
             'fixed.'
         );
-      }
-
-      addHeading('Build');
-
-      // Same look as addLine, but in the code face, so a command or a
-      // line of build output can be read as the literal text it is.
-      const addMonoLine = (text: string, parent?: HTMLElement) => {
-        const line = document.createElement('div');
-        line.textContent = text;
-        line.style.fontFamily = 'var(--jp-code-font-family, monospace)';
-        (parent || body).appendChild(line);
-      };
-
-      if (snapshot.build_available === true) {
-        const buildButton = document.createElement('button');
-        buildButton.type = 'button';
-        buildButton.className = 'jp-Dialog-button jp-mod-accept jp-mod-styled';
-        buildButton.textContent = 'Build image locally';
-        body.appendChild(buildButton);
-
-        const buildStatus = document.createElement('div');
-        buildStatus.style.marginTop = '4px';
-        body.appendChild(buildStatus);
-
-        // Only filled in when a build fails: the tail of the build output,
-        // so the reason is visible without leaving the dialog.
-        const buildLog = document.createElement('div');
-        buildLog.style.marginTop = '4px';
-        body.appendChild(buildLog);
-
-        const setBuildStatus = statusWriter(buildStatus);
-
-        const showBuildLog = (lines: string[]) => {
-          buildLog.textContent = '';
-          lines.slice(-8).forEach(line => addMonoLine(line, buildLog));
-        };
-
-        // The dialog stays open and usable while this runs: the click
-        // handler returns immediately and this writes into the status
-        // line once the server answers.
-        const runBuild = async () => {
-          buildButton.disabled = true;
-          buildLog.textContent = '';
-          setBuildStatus('Building the image. This can take a few minutes.');
-
-          const buildUrl = PageConfig.getBaseUrl() + 'icos-ext/build';
-
-          const response = await freezeRequest(buildUrl, {
-            method: 'POST',
-            body: JSON.stringify({ path: snapshotPath })
-          });
-          if (!response) {
-            setBuildStatus(unreachableMessage('build', snapshotPath), true);
-            buildButton.disabled = false;
-            return;
-          }
-
-          let result: IFreezeBuild;
-          try {
-            result = (await response.json()) as IFreezeBuild;
-          } catch (error) {
-            logUnreadable(buildUrl, error);
-            setBuildStatus(
-              'The server sent a response that could not be read (HTTP ' +
-                response.status +
-                ' ' +
-                response.statusText +
-                ').',
-              true
-            );
-            buildButton.disabled = false;
-            return;
-          }
-
-          if (response.ok && result.status === 'ok') {
-            // Nothing left to do, so the button stays disabled.
-            setBuildStatus(
-              'Built "' +
-                (result.tag || 'unknown') +
-                '". It is now in your local Docker image list.'
-            );
-            return;
-          }
-
-          if (response.status === 422) {
-            setBuildStatus(result.reason || 'The build failed.', true);
-            showBuildLog(result.log_tail || []);
-            buildButton.disabled = false;
-            return;
-          }
-
-          if (response.status === 409) {
-            setBuildStatus(
-              result.reason || 'The server cannot build this directory.'
-            );
-            buildButton.disabled = false;
-            return;
-          }
-
-          setBuildStatus(
-            httpFailureMessage('build', snapshotPath, response),
-            true
-          );
-          buildButton.disabled = false;
-        };
-
-        buildButton.addEventListener('click', () => {
-          void runBuild();
-        });
-      } else {
-        addLine(
-          'This server cannot build the image for you. Build it by hand ' +
-            'from a terminal on a machine that has Docker:'
-        );
-        addMonoLine('cd "' + directory + '"');
-        addMonoLine('docker build -t icos-frozen:local .');
       }
 
       const missing = snapshot.missing || [];
