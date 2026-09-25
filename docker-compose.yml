@@ -1,0 +1,19 @@
+services:
+  # Local development: a Lab container built from this repository, with
+  # the demo directory mounted so there is something to freeze.
+  lab:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_TOKEN: "icos"
+      JUPYTER_IMAGE_SPEC: "${JUPYTER_IMAGE_SPEC:-quay.io/jupyter/datascience-notebook@sha256:8040395c8534cdf96388c20a85a2e89a259dbce057e67d6fd7577c2a9beea5c3}"
+    user: root
+    volumes:
+      - lab-data:/home/jovyan/work
+      - ./demo:/home/jovyan/freeze_demo
+
+volumes:
+  lab-data:
