@@ -381,9 +381,14 @@
   align-items: center;
   justify-content: center;
 
-  /* Blocking input is half the point, so the overlay keeps its default
-     pointer events and swallows every click that lands on it, and the
-     cursor says so rather than inviting another click. */
+  /* Blocking input is half the point, and the cursor says so rather
+     than inviting another click — but only while the ice is actually
+     up. The node goes into the page a frame before it turns visible
+     and lingers for the fade out after, and an invisible sheet at
+     z-index 100000 swallowing clicks meant for the report underneath
+     is a lockout, so the pointer is only stopped in the visible
+     state. */
+  pointer-events: none;
   cursor: progress;
 
   /* Nothing shows until a freeze starts, and the fade out is the slower
@@ -394,6 +399,7 @@
 }
 
 #icos-freeze-overlay.is-visible {
+  pointer-events: auto;
   opacity: 1;
   transition: opacity 220ms ease-out;
 }
@@ -632,7 +638,7 @@
    the overlay just appears at its settled state and disappears again. A
    user who asked for less motion still gets the full message that the
    app is busy and blocked. Dropping the transition means transitionend
-   never fires here, which is exactly why the teardown in index.ts also
+   never fires here, which is exactly why the teardown in freeze.ts also
    has a timeout — without it this block would leave the screen iced
    over for good. */
 @media (prefers-reduced-motion: reduce) {

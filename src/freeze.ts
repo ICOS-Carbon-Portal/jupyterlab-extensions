@@ -13,137 +13,665 @@ import { ServerConnection } from '@jupyterlab/services';
    Freeze (top menu bar item)
 ------------------------------------------- */
 
+interface IFreezeRequirement {
+  name: string;
+}
+
+interface IFreezePackage {
+  name: string;
+  version: string | null;
+  source: string;
+}
+
+// The optional members below are the ones the report reads with a
+// `|| []` guard: they mirror a server payload, so the guard is real
+// rather than dead code.
+interface IFreezeNotebook {
+  name: string;
+  packages?: IFreezePackage[];
+}
+
+interface IFreezeNotebookInstall {
+  name: string;
+  packages?: string[];
+}
+
+interface IFreezeConflict {
+  package: string;
+  notebook: string;
+  notebook_version: string | null;
+  requirements_file: string;
+  requirements_version: string | null;
+}
+
+interface IFreezeEnvPackage {
+  name: string;
+  installed_version: string | null;
+  manager: string | null;
+}
+
+interface IFreezeSnapshot {
+  path: string;
+  image: string | null;
+  requirements?: IFreezeRequirement[];
+  notebooks?: IFreezeNotebook[];
+  conflicts?: IFreezeConflict[];
+  dockerfile_blocked?: string | null;
+  notebook_installs?: IFreezeNotebookInstall[];
+  python_version?: string;
+  provenance_method?: string;
+  user_installed?: IFreezeEnvPackage[];
+  missing?: string[];
+  dockerfile_written?: string | null;
+  bundle_available?: boolean;
+}
+
+interface IFreezeBundleBlocked {
+  reason?: string;
+}
+
+// The report the freeze dialog shows. Each section below is rendered
+// by its own function, and they all only ever add to the end, so this
+// is what they are handed instead of the element itself: the three
+// line helpers are then written once rather than once per section.
+// `append` is for the few places that build a node of their own.
+interface IReport {
+  node: HTMLDivElement;
+  addLine: (text: string) => void;
+  addHeading: (text: string, color?: string) => void;
+  addConflictLine: (text: string) => void;
+  append: (child: HTMLElement) => void;
+}
+
+// The server says a package was installed by the user either from the
+// baseline the image build recorded, which is exact, or — when the
+// image has no baseline — from file timestamps, which is a guess. The
+// report has to say which, so this is the value that means "exact".
+const BASELINE_PROVENANCE = 'baseline';
+
+const warnColor = 'var(--jp-warn-color1, #d9822b)';
+
+// The freeze and the package each report the same two failures in
+// the same words — only the verb and the directory change — so that
+// wording is written once here.
+const unreachableMessage = (verb: string, target: string) =>
+  'Could not reach the server to ' +
+  verb +
+  ' "' +
+  (target || '/') +
+  '". Check that you are still connected and try again.';
+
+// HTTP/2 dropped the reason phrase, so statusText is an empty string
+// on most servers now and appending it unconditionally would leave a
+// dangling space inside the brackets: "(HTTP 500 )".
+const httpFailureMessage = (verb: string, target: string, response: Response) =>
+  'The server could not ' +
+  verb +
+  ' "' +
+  (target || '/') +
+  '" (HTTP ' +
+  response.status +
+  (response.statusText ? ' ' + response.statusText : '') +
+  ').';
+
+const logUnreadable = (url: string, error: unknown) =>
+  console.error('Freeze: could not read the response from ' + url, error);
+
+const logHttpFailure = (url: string, response: Response) =>
+  console.error(
+    'Freeze: ' +
+      url +
+      ' returned ' +
+      response.status +
+      ' ' +
+      response.statusText
+  );
+
+// Returns null when the request never reached the server. Where
+// that gets reported is the caller's business: the freeze itself
+// uses a dialog, the button in the report writes into its own
+// status line.
+const freezeRequest = async (
+  url: string,
+  init: RequestInit
+): Promise<Response | null> => {
+  try {
+    return await ServerConnection.makeRequest(
+      url,
+      init,
+      ServerConnection.makeSettings()
+    );
+  } catch (error) {
+    console.error('Freeze: could not reach ' + url, error);
+    return null;
+  }
+};
+
+// Both buttons further down report into a status line under
+// themselves, in the same two looks: plain while something is
+// happening, bold warn colour when it failed.
+const statusWriter = (node: HTMLElement) => (text: string, warn?: boolean) => {
+  node.textContent = text;
+  node.style.color = warn ? warnColor : '';
+  node.style.fontWeight = warn ? 'bold' : '';
+};
+
+const formatVersion = (value: string | null) => value || 'unspecified';
+
+// "cartopy and pandas", "netCDF4, scipy and xarray". The user is
+// being told to go and move these by hand, so the list is written
+// the way the instruction would be spoken rather than as a bare
+// comma-separated run.
+const formatPackageList = (packages: string[]): string => {
+  if (packages.length === 0) {
+    return 'its packages';
+  }
+  if (packages.length === 1) {
+    return packages[0];
+  }
+  return (
+    packages.slice(0, -1).join(', ') + ' and ' + packages[packages.length - 1]
+  );
+};
+
+// The server names the file in Content-Disposition so the tester
+// gets the name the instructions mention. Anything unexpected in
+// that header falls back to a plain name rather than failing.
+const filenameFrom = (disposition: string | null) => {
+  const match = /filename="?([^";]+)"?/i.exec(disposition || '');
+  const name = match ? match[1].trim() : '';
+  return name || 'frozen-package.zip';
+};
+
+const createReport = (): IReport => {
+  const body = document.createElement('div');
+  body.style.maxHeight = '300px';
+  body.style.overflow = 'auto';
+  body.style.whiteSpace = 'pre-wrap';
+
+  // A long report scrolls, and unless the dialog happens to offer a
+  // download button it holds nothing focusable, so without this a
+  // keyboard user cannot reach the scroll container to read past the
+  // first screenful.
+  body.tabIndex = 0;
+
+  const addLine = (text: string) => {
+    const line = document.createElement('div');
+    line.textContent = text;
+    body.appendChild(line);
+  };
+
+  const addHeading = (text: string, color?: string) => {
+    const heading = document.createElement('div');
+    heading.textContent = text;
+    heading.style.fontWeight = 'bold';
+    heading.style.marginTop = body.firstChild ? '12px' : '0';
+    heading.style.marginBottom = '2px';
+    heading.style.borderBottom = '1px solid var(--jp-border-color2, #bdbdbd)';
+    if (color) {
+      heading.style.color = color;
+    }
+    body.appendChild(heading);
+  };
+
+  const addConflictLine = (text: string) => {
+    const line = document.createElement('div');
+    line.textContent = text;
+    line.style.color = warnColor;
+    line.style.fontWeight = 'bold';
+    body.appendChild(line);
+  };
+
+  return {
+    node: body,
+    addLine,
+    addHeading,
+    addConflictLine,
+    append: (child: HTMLElement) => body.appendChild(child)
+  };
+};
+
+// Renders one conflict as a summary line, a button per candidate
+// version, and — once a candidate is picked — the exact edit that
+// makes the conflict go away. Nothing is sent to the server and no
+// file is touched; this is advice for the user to apply by hand.
+const addConflictBlock = (report: IReport, conflict: IFreezeConflict) => {
+  const block = document.createElement('div');
+  block.style.marginBottom = '8px';
+
+  const summary = document.createElement('div');
+  summary.textContent =
+    conflict.package +
+    ' — ' +
+    conflict.notebook +
+    ' wants ' +
+    formatVersion(conflict.notebook_version) +
+    ', ' +
+    conflict.requirements_file +
+    ' wants ' +
+    formatVersion(conflict.requirements_version);
+  summary.style.color = warnColor;
+  summary.style.fontWeight = 'bold';
+
+  const choices = document.createElement('div');
+  choices.style.display = 'flex';
+  choices.style.flexWrap = 'wrap';
+  choices.style.gap = '6px';
+  choices.style.marginTop = '4px';
+
+  const instruction = document.createElement('div');
+  instruction.style.marginTop = '4px';
+
+  // The edit to make appears here only once a version is picked, so
+  // it is new text arriving in a place the user is not looking at.
+  instruction.setAttribute('role', 'status');
+
+  block.appendChild(summary);
+  block.appendChild(choices);
+  block.appendChild(instruction);
+  report.append(block);
+
+  const choiceButtons: HTMLButtonElement[] = [];
+
+  const addChoice = (version: string, fromFile: string, otherFile: string) => {
+    const button = document.createElement('button');
+    button.className = 'jp-mod-styled';
+    button.textContent = 'Keep ' + version + ' (' + fromFile + ')';
+
+    // Which version is picked is otherwise said only in colour and
+    // weight, neither of which is announced.
+    button.setAttribute('aria-pressed', 'false');
+
+    button.addEventListener('click', () => {
+      choiceButtons.forEach(other => {
+        other.style.color = '';
+        other.style.fontWeight = '';
+        other.style.borderColor = '';
+        other.setAttribute('aria-pressed', 'false');
+      });
+      button.style.color = 'var(--jp-brand-color1)';
+      button.style.fontWeight = 'bold';
+      button.style.borderColor = 'var(--jp-brand-color1)';
+      button.setAttribute('aria-pressed', 'true');
+      instruction.textContent =
+        'To keep ' +
+        version +
+        ': edit ' +
+        otherFile +
+        ' and change the ' +
+        conflict.package +
+        ' pin to ' +
+        version;
+    });
+    choiceButtons.push(button);
+    choices.appendChild(button);
+  };
+
+  if (conflict.notebook_version) {
+    addChoice(
+      conflict.notebook_version,
+      conflict.notebook,
+      conflict.requirements_file
+    );
+  }
+
+  if (conflict.requirements_version) {
+    addChoice(
+      conflict.requirements_version,
+      conflict.requirements_file,
+      conflict.notebook
+    );
+  }
+};
+
+const renderConflicts = (report: IReport, conflicts: IFreezeConflict[]) => {
+  if (conflicts.length === 0) {
+    report.addHeading('Conflicts');
+    report.addLine('No version conflicts found.');
+  } else {
+    report.addHeading('Conflicts (' + conflicts.length + ')', warnColor);
+    conflicts.forEach(conflict => addConflictBlock(report, conflict));
+  }
+};
+
+const renderDockerfile = (
+  report: IReport,
+  snapshot: IFreezeSnapshot,
+  directory: string,
+  conflicts: IFreezeConflict[]
+) => {
+  report.addHeading('Dockerfile');
+
+  const dockerfileWritten = snapshot.dockerfile_written;
+
+  if (dockerfileWritten === 'written') {
+    report.addLine('The Dockerfile was written into "' + directory + '".');
+  } else if (dockerfileWritten === 'unchanged') {
+    report.addLine(
+      'The Dockerfile in "' +
+        directory +
+        '" is already up to date, so nothing was rewritten.'
+    );
+  } else if (dockerfileWritten === 'skipped_foreign') {
+    report.addConflictLine(
+      '"' +
+        directory +
+        '" already has a hand-written Dockerfile, which was left ' +
+        'alone. The generated Dockerfile was not saved.'
+    );
+  } else if (dockerfileWritten === 'error') {
+    report.addConflictLine(
+      'The Dockerfile could not be written into "' +
+        directory +
+        '". The server log has the reason.'
+    );
+  } else {
+    const notebookInstalls = snapshot.notebook_installs || [];
+
+    // The conflict check has to come first here because it comes
+    // first on the server: a directory with both a conflict and a
+    // notebook install is blocked on the conflict, and the sentence
+    // the server wrote says so. Asking for the installs to be moved
+    // instead would send the user off to edit every notebook and
+    // leave them blocked by the same conflict afterwards.
+    if (conflicts.length === 0 && notebookInstalls.length > 0) {
+      // The block was caused by notebooks installing their own
+      // packages, and the server has named every one of them. That
+      // is a to-do list — one edit per notebook — so it is rendered
+      // as a list. The prose sentence below would make the user
+      // reread it to work out which file to open first.
+      report.addConflictLine('Changes needed before this can be frozen:');
+
+      notebookInstalls.forEach(install => {
+        const line = document.createElement('div');
+        line.style.color = warnColor;
+
+        // The notebook name carries the same weight it has in the
+        // Notebooks section, so a user scanning for a filename
+        // finds it in the same shape in both places.
+        const name = document.createElement('span');
+        name.textContent = install.name;
+        name.style.fontWeight = '600';
+        line.appendChild(name);
+
+        line.appendChild(
+          document.createTextNode(
+            ' — move ' +
+              formatPackageList(install.packages || []) +
+              ' into requirements.txt'
+          )
+        );
+
+        report.append(line);
+      });
+
+      report.addLine('Install them in this environment, then freeze again.');
+    } else {
+      // Everything else the server refuses on — a version conflict,
+      // a missing image spec — is a single sentence it already
+      // wrote, and there is no per-file list to draw. There is
+      // always a sentence: the Dockerfile goes unwritten only when
+      // the server refused, and a refusal always carries its reason.
+      if (snapshot.dockerfile_blocked) {
+        report.addConflictLine(snapshot.dockerfile_blocked);
+      }
+      report.addLine(
+        'Fix the files in this directory and freeze again to get a ' +
+          'Dockerfile.'
+      );
+    }
+  }
+};
+
+// Fetches the handover package and hands it to the browser. Every
+// outcome, good or bad, is written into the caller's status line; the
+// caller owns the button and re-enables it when this settles.
+const downloadBundle = async (
+  path: string,
+  setStatus: (text: string, warn?: boolean) => void
+) => {
+  setStatus('Preparing the package.');
+
+  const bundleUrl =
+    PageConfig.getBaseUrl() +
+    'icos-ext/bundle?path=' +
+    encodeURIComponent(path);
+
+  const response = await freezeRequest(bundleUrl, { method: 'GET' });
+  if (!response) {
+    setStatus(unreachableMessage('package', path), true);
+    return;
+  }
+
+  if (response.status === 409) {
+    let blocked: IFreezeBundleBlocked;
+    try {
+      blocked = (await response.json()) as IFreezeBundleBlocked;
+    } catch (error) {
+      logUnreadable(bundleUrl, error);
+      setStatus(
+        'The server refused to make the package and sent a reason ' +
+          'that could not be read.',
+        true
+      );
+      return;
+    }
+
+    // A refusal is a failure like any other here, so it is written
+    // in the same warn colour rather than reading as progress.
+    setStatus(
+      blocked.reason || 'The server cannot package this directory.',
+      true
+    );
+    return;
+  }
+
+  if (!response.ok) {
+    logHttpFailure(bundleUrl, response);
+    setStatus(httpFailureMessage('package', path, response), true);
+    return;
+  }
+
+  let blob: Blob;
+  try {
+    blob = await response.blob();
+  } catch (error) {
+    console.error(
+      'Freeze: could not read the package sent by ' + bundleUrl,
+      error
+    );
+    setStatus('The package could not be read from the server response.', true);
+    return;
+  }
+
+  const filename = filenameFrom(response.headers.get('Content-Disposition'));
+  const savedCopy = response.headers.get('X-Icos-Freeze-Saved');
+
+  // A throwaway link is the only way to hand a blob to the
+  // browser's own download machinery; it never joins the layout.
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  // The click only queues the download. Revoking in the same task
+  // has been enough to abort it in Firefox and Safari, so the URL is
+  // released in a later one, once the browser has taken the blob.
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+
+  setStatus(
+    'Downloaded "' +
+      filename +
+      '".' +
+      (savedCopy ? ' A copy was also saved into the directory.' : '')
+  );
+};
+
+const renderPackage = (
+  report: IReport,
+  bundleAvailable: boolean | undefined,
+  snapshotPath: string
+) => {
+  report.addHeading('Package');
+
+  if (bundleAvailable === true) {
+    report.addLine(
+      'The package holds the Dockerfile, the notebooks, the dependency ' +
+        'files and instructions for a tester.'
+    );
+
+    const packageButton = document.createElement('button');
+    packageButton.type = 'button';
+    packageButton.className = 'jp-Dialog-button jp-mod-accept jp-mod-styled';
+    packageButton.textContent = 'Download package';
+    report.append(packageButton);
+
+    const packageStatus = document.createElement('div');
+    packageStatus.style.marginTop = '4px';
+
+    // Everything this line ever says arrives after a click, well away
+    // from where the user is looking.
+    packageStatus.setAttribute('role', 'status');
+    report.append(packageStatus);
+
+    const setPackageStatus = statusWriter(packageStatus);
+
+    // The dialog stays open and usable while this runs: the click
+    // handler returns immediately and the download writes into the
+    // status line once the server answers. Downloading a second time
+    // is harmless and people do retry, so the button comes back
+    // however the attempt ended — including a throw, which the
+    // separate re-enables on each failure path could not cover.
+    packageButton.addEventListener('click', () => {
+      packageButton.disabled = true;
+      void downloadBundle(snapshotPath, setPackageStatus).finally(() => {
+        packageButton.disabled = false;
+      });
+    });
+  } else {
+    report.addLine(
+      'No package can be made until the Dockerfile problem above is fixed.'
+    );
+  }
+};
+
+const renderMissing = (report: IReport, missing: string[]) => {
+  if (missing.length > 0) {
+    report.addHeading('Not installed (' + missing.length + ')', warnColor);
+    missing.forEach(name => report.addConflictLine('  ' + name));
+    report.addLine(
+      'These packages are imported by the notebooks but are not ' +
+        'installed in this environment, so the build cannot reproduce ' +
+        'them.'
+    );
+  }
+};
+
+const renderEnvironment = (report: IReport, snapshot: IFreezeSnapshot) => {
+  report.addHeading('Environment');
+  report.addLine(
+    snapshot.image
+      ? 'Image: ' + snapshot.image
+      : 'No image spec reported by the server'
+  );
+  if (snapshot.python_version) {
+    report.addLine('Python: ' + snapshot.python_version);
+  }
+
+  const userInstalled = snapshot.user_installed || [];
+  if (userInstalled.length === 0) {
+    report.addLine(
+      'Nothing was installed on top of the image, so the image digest ' +
+        'alone reproduces this environment.'
+    );
+  } else {
+    report.addLine(
+      userInstalled.length +
+        ' package' +
+        (userInstalled.length === 1 ? '' : 's') +
+        ' installed on top of the image:'
+    );
+    userInstalled.forEach(pkg =>
+      report.addLine(
+        '  ' +
+          pkg.name +
+          ' ' +
+          (pkg.installed_version || 'unknown') +
+          ' (' +
+          (pkg.manager || 'unknown') +
+          ')'
+      )
+    );
+  }
+
+  // Without a baseline the server works the list out from file
+  // timestamps, which cannot tell a late layer of the image's own
+  // build from something the user installed. Both branches above then
+  // state as fact what was inferred, so the generated Dockerfile's own
+  // caveat is repeated here rather than left for whoever opens it.
+  if (
+    snapshot.provenance_method &&
+    snapshot.provenance_method !== BASELINE_PROVENANCE
+  ) {
+    report.addLine(
+      'This was read from file timestamps rather than a package baseline, ' +
+        'so it may include packages the image already ships and miss some ' +
+        'that were installed on top of it.'
+    );
+  }
+};
+
+const renderDependencyFiles = (
+  report: IReport,
+  requirements: IFreezeRequirement[]
+) => {
+  report.addHeading('Dependency files');
+  if (requirements.length === 0) {
+    report.addLine('No dependency files found in this directory.');
+  } else {
+    requirements.forEach(file => report.addLine('  ' + file.name));
+  }
+};
+
+const renderNotebooks = (report: IReport, notebooks: IFreezeNotebook[]) => {
+  report.addHeading('Notebooks');
+  if (notebooks.length === 0) {
+    report.addLine('No notebooks found in this directory.');
+  } else {
+    notebooks.forEach(notebook => {
+      const title = document.createElement('div');
+      title.textContent = notebook.name;
+      title.style.fontWeight = '600';
+      title.style.marginTop = '4px';
+      report.append(title);
+
+      const packages = notebook.packages || [];
+      if (packages.length === 0) {
+        report.addLine('  no packages found');
+      } else {
+        packages.forEach(pkg =>
+          report.addLine(
+            '  ' +
+              pkg.name +
+              (pkg.version ? ' ' + pkg.version : '') +
+              ' (' +
+              pkg.source +
+              ')'
+          )
+        );
+      }
+    });
+  }
+};
+
 const freeze: JupyterFrontEndPlugin<void> = {
   id: '@icos-ext/freeze',
   autoStart: true,
   requires: [IDefaultFileBrowser],
   activate: (app: JupyterFrontEnd, fileBrowser: IDefaultFileBrowser) => {
-    interface IFreezeRequirement {
-      name: string;
-      content: string;
-    }
-
-    interface IFreezePackage {
-      name: string;
-      version: string | null;
-      source: string;
-    }
-
-    // The optional members below are the ones the report reads with a
-    // `|| []` guard: they mirror a server payload, so the guard is real
-    // rather than dead code.
-    interface IFreezeNotebook {
-      name: string;
-      packages?: IFreezePackage[];
-    }
-
-    interface IFreezeNotebookInstall {
-      name: string;
-      packages?: string[];
-    }
-
-    interface IFreezeConflict {
-      package: string;
-      notebook: string;
-      notebook_version: string | null;
-      requirements_file: string;
-      requirements_version: string | null;
-    }
-
-    interface IFreezeEnvPackage {
-      name: string;
-      import_name: string | null;
-      installed_version: string | null;
-      manager: string | null;
-      provenance: string;
-    }
-
-    interface IFreezeSnapshot {
-      path: string;
-      image: string | null;
-      requirements?: IFreezeRequirement[];
-      notebooks?: IFreezeNotebook[];
-      conflicts?: IFreezeConflict[];
-      dockerfile_blocked?: string | null;
-      notebook_installs?: IFreezeNotebookInstall[];
-      python_version?: string;
-      environment?: IFreezeEnvPackage[];
-      user_installed?: IFreezeEnvPackage[];
-      missing?: string[];
-      dockerfile_written?: string | null;
-      bundle_available?: boolean;
-    }
-
-    interface IFreezeBundleBlocked {
-      status?: string;
-      reason?: string;
-    }
-
-    const showFreezeError = (message: string) =>
-      showDialog({
-        title: 'Freeze',
-        body: message,
-        buttons: [Dialog.okButton()]
-      });
-
-    // The freeze and the package each report the same two failures in
-    // the same words — only the verb and the directory change — so that
-    // wording is written once here.
-    const unreachableMessage = (verb: string, target: string) =>
-      'Could not reach the server to ' +
-      verb +
-      ' "' +
-      (target || '/') +
-      '". Check that you are still connected and try again.';
-
-    const httpFailureMessage = (
-      verb: string,
-      target: string,
-      response: Response
-    ) =>
-      'The server could not ' +
-      verb +
-      ' "' +
-      (target || '/') +
-      '" (HTTP ' +
-      response.status +
-      ' ' +
-      response.statusText +
-      ').';
-
-    const logUnreadable = (url: string, error: unknown) =>
-      console.error('Freeze: could not read the response from ' + url, error);
-
-    const logHttpFailure = (url: string, response: Response) =>
-      console.error(
-        'Freeze: ' +
-          url +
-          ' returned ' +
-          response.status +
-          ' ' +
-          response.statusText
-      );
-
-    // Returns null when the request never reached the server. Where
-    // that gets reported is the caller's business: the freeze itself
-    // uses a dialog, the button in the report writes into its own
-    // status line.
-    const freezeRequest = async (
-      url: string,
-      init: RequestInit
-    ): Promise<Response | null> => {
-      try {
-        return await ServerConnection.makeRequest(
-          url,
-          init,
-          ServerConnection.makeSettings()
-        );
-      } catch (error) {
-        console.error('Freeze: could not reach ' + url, error);
-        return null;
-      }
-    };
-
     // The button is built at the end of this activate, well after the
     // snapshot code that has to drive it, so the nodes are parked here
     // and every use below is null-safe: a freeze started from the
@@ -283,8 +811,6 @@ const freeze: JupyterFrontEndPlugin<void> = {
           document.body.appendChild(overlay);
         }
 
-        overlay.hidden = false;
-
         // The node is reused between freezes, so the line is redrawn
         // each time rather than only when it is built.
         if (freezeOverlayTextNode) {
@@ -295,7 +821,9 @@ const freeze: JupyterFrontEndPlugin<void> = {
 
         // The class has to land in a later frame than the insert. In the
         // same frame the browser has no earlier opacity to transition
-        // from, so the ice would snap in instead of fading.
+        // from, so the ice would snap in instead of fading. Until it
+        // lands the overlay is transparent and, by the stylesheet, lets
+        // the pointer through, so these two frames block nothing.
         window.requestAnimationFrame(() => {
           window.requestAnimationFrame(() => {
             if (freezeOverlayNode === overlay && overlay.isConnected) {
@@ -315,6 +843,10 @@ const freeze: JupyterFrontEndPlugin<void> = {
         return;
       }
 
+      // Dropping the class both starts the fade and, by the stylesheet,
+      // stops the overlay taking the pointer: for the third of a second
+      // it spends fading it is a full-window sheet at z-index 100000
+      // that must not swallow clicks on whatever is underneath.
       overlay.classList.remove('is-visible');
 
       if (!overlay.isConnected) {
@@ -337,6 +869,22 @@ const freeze: JupyterFrontEndPlugin<void> = {
       // One place knows about the busy state, so the ice and the button
       // can never disagree about whether a freeze is running.
       setFreezeOverlay(busy);
+    };
+
+    // The ice comes down before the dialog goes up. JupyterLab draws
+    // dialogs at z-index 10000 and the overlay sits at 100000, so an
+    // error raised while a freeze is still marked busy would render
+    // behind the frost with every click on it swallowed — and the
+    // freeze is over by then anyway. Clearing it twice is harmless:
+    // captureSnapshot clears it again in its finally.
+    const showFreezeError = (message: string) => {
+      setFreezeBusy(false);
+
+      return showDialog({
+        title: 'Freeze',
+        body: message,
+        buttons: [Dialog.okButton()]
+      });
     };
 
     const performSnapshot = async (path: string) => {
@@ -368,465 +916,22 @@ const freeze: JupyterFrontEndPlugin<void> = {
         return;
       }
 
-      const body = document.createElement('div');
-      body.style.maxHeight = '300px';
-      body.style.overflow = 'auto';
-      body.style.whiteSpace = 'pre-wrap';
-
-      const addLine = (text: string) => {
-        const line = document.createElement('div');
-        line.textContent = text;
-        body.appendChild(line);
-      };
-
-      const warnColor = 'var(--jp-warn-color1, #d9822b)';
-
-      const addHeading = (text: string, color?: string) => {
-        const heading = document.createElement('div');
-        heading.textContent = text;
-        heading.style.fontWeight = 'bold';
-        heading.style.marginTop = body.firstChild ? '12px' : '0';
-        heading.style.marginBottom = '2px';
-        heading.style.borderBottom =
-          '1px solid var(--jp-border-color2, #bdbdbd)';
-        if (color) {
-          heading.style.color = color;
-        }
-        body.appendChild(heading);
-      };
-
-      const addConflictLine = (text: string) => {
-        const line = document.createElement('div');
-        line.textContent = text;
-        line.style.color = warnColor;
-        line.style.fontWeight = 'bold';
-        body.appendChild(line);
-      };
-
-      // Both buttons further down report into a status line under
-      // themselves, in the same two looks: plain while something is
-      // happening, bold warn colour when it failed.
-      const statusWriter =
-        (node: HTMLElement) => (text: string, warn?: boolean) => {
-          node.textContent = text;
-          node.style.color = warn ? warnColor : '';
-          node.style.fontWeight = warn ? 'bold' : '';
-        };
-
-      const formatVersion = (value: string | null) => value || 'unspecified';
-
-      // "cartopy and pandas", "netCDF4, scipy and xarray". The user is
-      // being told to go and move these by hand, so the list is written
-      // the way the instruction would be spoken rather than as a bare
-      // comma-separated run.
-      const formatPackageList = (packages: string[]): string => {
-        if (packages.length === 0) {
-          return 'its packages';
-        }
-        if (packages.length === 1) {
-          return packages[0];
-        }
-        return (
-          packages.slice(0, -1).join(', ') +
-          ' and ' +
-          packages[packages.length - 1]
-        );
-      };
-
-      // Renders one conflict as a summary line, a button per candidate
-      // version, and — once a candidate is picked — the exact edit that
-      // makes the conflict go away. Nothing is sent to the server and no
-      // file is touched; this is advice for the user to apply by hand.
-      const addConflictBlock = (conflict: IFreezeConflict) => {
-        const block = document.createElement('div');
-        block.style.marginBottom = '8px';
-
-        const summary = document.createElement('div');
-        summary.textContent =
-          conflict.package +
-          ' — ' +
-          conflict.notebook +
-          ' wants ' +
-          formatVersion(conflict.notebook_version) +
-          ', ' +
-          conflict.requirements_file +
-          ' wants ' +
-          formatVersion(conflict.requirements_version);
-        summary.style.color = warnColor;
-        summary.style.fontWeight = 'bold';
-
-        const choices = document.createElement('div');
-        choices.style.display = 'flex';
-        choices.style.flexWrap = 'wrap';
-        choices.style.gap = '6px';
-        choices.style.marginTop = '4px';
-
-        const instruction = document.createElement('div');
-        instruction.style.marginTop = '4px';
-
-        block.appendChild(summary);
-        block.appendChild(choices);
-        block.appendChild(instruction);
-        body.appendChild(block);
-
-        const choiceButtons: HTMLButtonElement[] = [];
-
-        const addChoice = (
-          version: string,
-          fromFile: string,
-          otherFile: string
-        ) => {
-          const button = document.createElement('button');
-          button.className = 'jp-mod-styled';
-          button.textContent = 'Keep ' + version + ' (' + fromFile + ')';
-          button.addEventListener('click', () => {
-            choiceButtons.forEach(other => {
-              other.style.color = '';
-              other.style.fontWeight = '';
-              other.style.borderColor = '';
-            });
-            button.style.color = 'var(--jp-brand-color1)';
-            button.style.fontWeight = 'bold';
-            button.style.borderColor = 'var(--jp-brand-color1)';
-            instruction.textContent =
-              'To keep ' +
-              version +
-              ': edit ' +
-              otherFile +
-              ' and change the ' +
-              conflict.package +
-              ' pin to ' +
-              version;
-          });
-          choiceButtons.push(button);
-          choices.appendChild(button);
-        };
-
-        if (conflict.notebook_version) {
-          addChoice(
-            conflict.notebook_version,
-            conflict.notebook,
-            conflict.requirements_file
-          );
-        }
-
-        if (conflict.requirements_version) {
-          addChoice(
-            conflict.requirements_version,
-            conflict.requirements_file,
-            conflict.notebook
-          );
-        }
-      };
-
-      const conflicts = snapshot.conflicts || [];
-      const notebooks = snapshot.notebooks || [];
-
-      if (conflicts.length === 0) {
-        addHeading('Conflicts');
-        addLine('No version conflicts found.');
-      } else {
-        addHeading('Conflicts (' + conflicts.length + ')', warnColor);
-        conflicts.forEach(conflict => addConflictBlock(conflict));
-      }
-
-      addHeading('Dockerfile');
-
-      // The server echoes back the directory it actually walked, so
-      // that is what every message and both follow-up requests use,
-      // falling back to the requested path and then to the root.
+      // The server echoes back the path it was asked for, not the
+      // directory it actually walked, so that is what every message and
+      // both follow-up requests use, falling back to the requested path
+      // and then to the root.
       const snapshotPath = snapshot.path || path;
       const directory = snapshotPath || '/';
-      const dockerfileWritten = snapshot.dockerfile_written;
+      const conflicts = snapshot.conflicts || [];
 
-      if (dockerfileWritten === 'written') {
-        addLine('The Dockerfile was written into "' + directory + '".');
-      } else if (dockerfileWritten === 'unchanged') {
-        addLine(
-          'The Dockerfile in "' +
-            directory +
-            '" is already up to date, so nothing was rewritten.'
-        );
-      } else if (dockerfileWritten === 'skipped_foreign') {
-        addConflictLine(
-          '"' +
-            directory +
-            '" already has a hand-written Dockerfile, which was left ' +
-            'alone. The generated Dockerfile was not saved.'
-        );
-      } else if (dockerfileWritten === 'error') {
-        addConflictLine(
-          'The Dockerfile could not be written into "' +
-            directory +
-            '". The server log has the reason.'
-        );
-      } else {
-        const notebookInstalls = snapshot.notebook_installs || [];
-
-        if (notebookInstalls.length > 0) {
-          // The block was caused by notebooks installing their own
-          // packages, and the server has named every one of them. That
-          // is a to-do list — one edit per notebook — so it is rendered
-          // as a list. The prose sentence below would make the user
-          // reread it to work out which file to open first.
-          addConflictLine('Changes needed before this can be frozen:');
-
-          notebookInstalls.forEach(install => {
-            const line = document.createElement('div');
-            line.style.color = warnColor;
-
-            // The notebook name carries the same weight it has in the
-            // Notebooks section, so a user scanning for a filename
-            // finds it in the same shape in both places.
-            const name = document.createElement('span');
-            name.textContent = install.name;
-            name.style.fontWeight = '600';
-            line.appendChild(name);
-
-            line.appendChild(
-              document.createTextNode(
-                ' — move ' +
-                  formatPackageList(install.packages || []) +
-                  ' into requirements.txt'
-              )
-            );
-
-            body.appendChild(line);
-          });
-
-          addLine('Install them in this environment, then freeze again.');
-        } else {
-          // Everything else the server refuses on — a version conflict,
-          // a missing image spec — is a single sentence it already
-          // wrote, and there is no per-file list to draw.
-          addConflictLine(
-            snapshot.dockerfile_blocked ||
-              'The server did not generate a Dockerfile for this directory.'
-          );
-          addLine(
-            'Fix the files in this directory and freeze again to get a ' +
-              'Dockerfile.'
-          );
-        }
-      }
-
-      addHeading('Package');
-
-      if (snapshot.bundle_available === true) {
-        addLine(
-          'The package holds the Dockerfile, the notebooks, the dependency ' +
-            'files and instructions for a tester.'
-        );
-
-        const packageButton = document.createElement('button');
-        packageButton.type = 'button';
-        packageButton.className =
-          'jp-Dialog-button jp-mod-accept jp-mod-styled';
-        packageButton.textContent = 'Download package';
-        body.appendChild(packageButton);
-
-        const packageStatus = document.createElement('div');
-        packageStatus.style.marginTop = '4px';
-        body.appendChild(packageStatus);
-
-        const setPackageStatus = statusWriter(packageStatus);
-
-        // The server names the file in Content-Disposition so the tester
-        // gets the name the instructions mention. Anything unexpected in
-        // that header falls back to a plain name rather than failing.
-        const filenameFrom = (disposition: string | null) => {
-          const match = /filename="?([^";]+)"?/i.exec(disposition || '');
-          const name = match ? match[1].trim() : '';
-          return name || 'frozen-package.zip';
-        };
-
-        // The dialog stays open and usable while this runs: the click
-        // handler returns immediately and this writes into the status
-        // line once the server answers.
-        const downloadPackage = async () => {
-          packageButton.disabled = true;
-          setPackageStatus('Preparing the package.');
-
-          const bundleUrl =
-            PageConfig.getBaseUrl() +
-            'icos-ext/bundle?path=' +
-            encodeURIComponent(snapshotPath);
-
-          const response = await freezeRequest(bundleUrl, { method: 'GET' });
-          if (!response) {
-            setPackageStatus(unreachableMessage('package', snapshotPath), true);
-            packageButton.disabled = false;
-            return;
-          }
-
-          if (response.status === 409) {
-            let blocked: IFreezeBundleBlocked;
-            try {
-              blocked = (await response.json()) as IFreezeBundleBlocked;
-            } catch (error) {
-              logUnreadable(bundleUrl, error);
-              setPackageStatus(
-                'The server refused to make the package and sent a reason ' +
-                  'that could not be read.',
-                true
-              );
-              packageButton.disabled = false;
-              return;
-            }
-
-            setPackageStatus(
-              blocked.reason || 'The server cannot package this directory.'
-            );
-            packageButton.disabled = false;
-            return;
-          }
-
-          if (!response.ok) {
-            logHttpFailure(bundleUrl, response);
-            setPackageStatus(
-              httpFailureMessage('package', snapshotPath, response),
-              true
-            );
-            packageButton.disabled = false;
-            return;
-          }
-
-          let blob: Blob;
-          try {
-            blob = await response.blob();
-          } catch (error) {
-            console.error(
-              'Freeze: could not read the package sent by ' + bundleUrl,
-              error
-            );
-            setPackageStatus(
-              'The package could not be read from the server response.',
-              true
-            );
-            packageButton.disabled = false;
-            return;
-          }
-
-          const filename = filenameFrom(
-            response.headers.get('Content-Disposition')
-          );
-          const savedCopy = response.headers.get('X-Icos-Freeze-Saved');
-
-          // A throwaway link is the only way to hand a blob to the
-          // browser's own download machinery; it never joins the layout.
-          const objectUrl = URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = objectUrl;
-          link.download = filename;
-          document.body.appendChild(link);
-          link.click();
-          URL.revokeObjectURL(objectUrl);
-          link.remove();
-
-          // Downloading a second time is harmless and people do retry,
-          // so the button stays enabled.
-          setPackageStatus(
-            'Downloaded "' +
-              filename +
-              '".' +
-              (savedCopy ? ' A copy was also saved into the directory.' : '')
-          );
-          packageButton.disabled = false;
-        };
-
-        packageButton.addEventListener('click', () => {
-          void downloadPackage();
-        });
-      } else {
-        addLine(
-          'No package can be made until the Dockerfile problem above is ' +
-            'fixed.'
-        );
-      }
-
-      const missing = snapshot.missing || [];
-      if (missing.length > 0) {
-        addHeading('Not installed (' + missing.length + ')', warnColor);
-        missing.forEach(name => addConflictLine('  ' + name));
-        addLine(
-          'These packages are imported by the notebooks but are not ' +
-            'installed in this environment, so the build cannot reproduce ' +
-            'them.'
-        );
-      }
-
-      addHeading('Environment');
-      addLine(
-        snapshot.image
-          ? 'Image: ' + snapshot.image
-          : 'No image spec reported by the server'
-      );
-      if (snapshot.python_version) {
-        addLine('Python: ' + snapshot.python_version);
-      }
-
-      const userInstalled = snapshot.user_installed || [];
-      if (userInstalled.length === 0) {
-        addLine(
-          'Nothing was installed on top of the image, so the image digest ' +
-            'alone reproduces this environment.'
-        );
-      } else {
-        addLine(
-          userInstalled.length +
-            ' package' +
-            (userInstalled.length === 1 ? '' : 's') +
-            ' installed on top of the image:'
-        );
-        userInstalled.forEach(pkg =>
-          addLine(
-            '  ' +
-              pkg.name +
-              ' ' +
-              (pkg.installed_version || 'unknown') +
-              ' (' +
-              (pkg.manager || 'unknown') +
-              ')'
-          )
-        );
-      }
-
-      addHeading('Dependency files');
-      const requirements = snapshot.requirements || [];
-      if (requirements.length === 0) {
-        addLine('No dependency files found in this directory.');
-      } else {
-        requirements.forEach(file => addLine('  ' + file.name));
-      }
-
-      addHeading('Notebooks');
-      if (notebooks.length === 0) {
-        addLine('No notebooks found in this directory.');
-      } else {
-        notebooks.forEach(notebook => {
-          const title = document.createElement('div');
-          title.textContent = notebook.name;
-          title.style.fontWeight = '600';
-          title.style.marginTop = '4px';
-          body.appendChild(title);
-
-          const packages = notebook.packages || [];
-          if (packages.length === 0) {
-            addLine('  no packages found');
-          } else {
-            packages.forEach(pkg =>
-              addLine(
-                '  ' +
-                  pkg.name +
-                  (pkg.version ? ' ' + pkg.version : '') +
-                  ' (' +
-                  pkg.source +
-                  ')'
-              )
-            );
-          }
-        });
-      }
+      const report = createReport();
+      renderConflicts(report, conflicts);
+      renderDockerfile(report, snapshot, directory, conflicts);
+      renderPackage(report, snapshot.bundle_available, snapshotPath);
+      renderMissing(report, snapshot.missing || []);
+      renderEnvironment(report, snapshot);
+      renderDependencyFiles(report, snapshot.requirements || []);
+      renderNotebooks(report, snapshot.notebooks || []);
 
       // The freeze itself is finished the moment the report is ready, so
       // the button stops reading "Freezing…" here rather than waiting for
@@ -836,7 +941,7 @@ const freeze: JupyterFrontEndPlugin<void> = {
 
       await showDialog({
         title: 'Freeze: ' + directory,
-        body: new Widget({ node: body }),
+        body: new Widget({ node: report.node }),
         buttons: [Dialog.okButton()]
       });
     };
@@ -900,8 +1005,14 @@ const freeze: JupyterFrontEndPlugin<void> = {
     freezeButtonNode = button;
     freezeLabelNode = label;
 
+    // Everything captureSnapshot expects to go wrong is reported in a
+    // dialog, but anything it did not expect would otherwise be an
+    // unhandled rejection with nothing on screen and nothing in the
+    // console to explain the button that just stopped responding.
     button.addEventListener('click', () => {
-      void captureSnapshot(fileBrowser.model.path);
+      void captureSnapshot(fileBrowser.model.path).catch(error =>
+        console.error('Freeze: the freeze failed', error)
+      );
     });
 
     const freezeButton = new Widget({ node: button });
