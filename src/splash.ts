@@ -14,11 +14,7 @@ import { DisposableDelegate } from '@lumino/disposable';
 const SPLASH_RECOVER_TIMEOUT = 12000;
 
 namespace CommandIDs {
-  export const loadState = 'apputils:load-statedb';
-  export const print = 'apputils:print';
   export const reset = 'apputils:reset';
-  export const resetOnLoad = 'apputils:reset-on-load';
-  export const runFirstEnabled = 'apputils:run-first-enabled';
 }
 
 const splash: JupyterFrontEndPlugin<ISplashScreen> = {
@@ -57,7 +53,9 @@ const splash: JupyterFrontEndPlugin<ISplashScreen> = {
     let dialog: Dialog<unknown> | null = null;
     const recovery = new Throttler(
       async () => {
-        if (dialog) return;
+        if (dialog) {
+          return;
+        }
         dialog = new Dialog({
           title: 'Loading...',
           body: `The loading screen is taking a long time.
@@ -68,22 +66,41 @@ Would you like to clear the workspace or keep waiting?`,
           ]
         });
 
+        // The dialog is cleared in a finally: an error out of launch()
+        // used to leave it set, and the guard above then silenced every
+        // later prompt for the rest of the session.
         try {
           const result = await dialog.launch();
-          dialog.dispose();
-          dialog = null;
           if (result.button.accept && commands.hasCommand(CommandIDs.reset)) {
             return commands.execute(CommandIDs.reset);
           }
-          requestAnimationFrame(() => void recovery.invoke().catch(() => undefined));
-        } catch { /* no-op */ }
+          requestAnimationFrame(
+            () => void recovery.invoke().catch(() => undefined)
+          );
+        } catch {
+          /* no-op */
+        } finally {
+          dialog?.dispose();
+          dialog = null;
+        }
       },
       { limit: SPLASH_RECOVER_TIMEOUT, edge: 'trailing' }
     );
 
     let splashCount = 0;
+
+    // The fade out removes the node 200ms after the last splash is
+    // disposed. A show() inside that window re-appends the node, and
+    // without this handle the pending removal would then tear the
+    // visible splash back off the page.
+    let removalTimer: number | null = null;
+
     return {
       show: () => {
+        if (removalTimer !== null) {
+          window.clearTimeout(removalTimer);
+          removalTimer = null;
+        }
         splash.classList.remove('splash-fade');
         splashCount++;
         document.body.appendChild(splash);
@@ -95,9 +112,18 @@ Would you like to clear the workspace or keep waiting?`,
           await Promise.all([restored, minDisplay]);
           if (--splashCount === 0) {
             void recovery.stop();
-            if (dialog) { dialog.dispose(); dialog = null; }
+            if (dialog) {
+              dialog.dispose();
+              dialog = null;
+            }
             splash.classList.add('splash-fade');
-            setTimeout(() => document.body.removeChild(splash), 200);
+            // remove() rather than document.body.removeChild(): it is a
+            // no-op on a node that is already detached, where removeChild
+            // would throw inside the timer with nothing to catch it.
+            removalTimer = window.setTimeout(() => {
+              removalTimer = null;
+              splash.remove();
+            }, 200);
           }
         });
       }
