@@ -29,14 +29,23 @@ const tracker: JupyterFrontEndPlugin<void> = {
         return;
       }
       const notebookPath = panel.context.path;
+      // A failed ping is not the user's problem, so it is logged at debug
+      // level: out of the console by default, but there when the tracking
+      // stops arriving and someone goes looking for the reason.
       ServerConnection.makeRequest(
         trackUrl,
         {
           method: 'POST',
-          body: JSON.stringify({ notebook: notebookPath, username, url: window.location.href })
+          body: JSON.stringify({
+            notebook: notebookPath,
+            username,
+            url: window.location.href
+          })
         },
         settings
-      ).catch(() => undefined);
+      ).catch(error =>
+        console.debug('Tracker: could not report ' + notebookPath, error)
+      );
     });
   }
 };
