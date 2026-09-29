@@ -163,3 +163,13 @@ that restates the code is deleted, however well written.
 - No archaeology. Describe the constraint that holds now, not a bug that
   used to exist, and put the comment on the line it concerns.
 - `src/` sits at roughly 7% comment-to-code. That is the intended level.
+
+## Documentation
+
+No em dashes in anything a reader opens: `README.md`, `docs/freeze.md`,
+and the README, compose file, `.dockerignore` and Dockerfile comments
+that a freeze package generates. Use a colon, a comma or a second
+sentence instead, never `--`. Code comments and docstrings keep the em
+dash.
+
+Keep `README.md` short. Detail belongs in `docs/`.
