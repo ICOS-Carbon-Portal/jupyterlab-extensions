@@ -29,8 +29,6 @@ pip install git+https://github.com/ICOS-Carbon-Portal/jupyterlab-extensions.git
 
 ## Local development
 
-### With Docker
-
 This builds a Lab container from the source in this repository and
 mounts `demo/` at `/home/jovyan/freeze_demo`, so there is something to
 freeze:
@@ -41,29 +39,3 @@ docker compose up --build
 
 Lab is then at `http://localhost:8888/lab` — no token, and bound to
 the loopback so only this machine can reach it.
-
-### Without Docker
-
-`jlpm` is JupyterLab's pinned copy of Yarn, installed with JupyterLab.
-
-```bash
-pip install -e "."
-jupyter labextension develop . --overwrite
-jlpm install
-jlpm build
-```
-
-To rebuild as you edit, run this in one terminal and `jupyter lab` in
-another:
-
-```bash
-jlpm watch
-```
-
-## Server endpoints
-
-| Route                  | What it does                                      |
-| ---------------------- | ------------------------------------------------- |
-| `POST /icos-ext/track` | Reports one notebook execution to Matomo          |
-| `GET /icos-ext/freeze` | Snapshots the environment, writes a build context |
-| `GET /icos-ext/bundle` | Returns the frozen directory as a zip             |
