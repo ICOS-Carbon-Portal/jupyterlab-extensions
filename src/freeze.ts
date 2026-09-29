@@ -9,10 +9,6 @@ import { Widget } from '@lumino/widgets';
 import { PageConfig } from '@jupyterlab/coreutils';
 import { ServerConnection } from '@jupyterlab/services';
 
-/* ------------------------------------------
-   Freeze (top menu bar item)
-------------------------------------------- */
-
 interface IFreezeRequirement {
   name: string;
 }
@@ -23,9 +19,6 @@ interface IFreezePackage {
   source: string;
 }
 
-// The optional members below are the ones the report reads with a
-// `|| []` guard: they mirror a server payload, so the guard is real
-// rather than dead code.
 interface IFreezeNotebook {
   name: string;
   packages?: IFreezePackage[];
@@ -70,11 +63,6 @@ interface IFreezeBundleBlocked {
   reason?: string;
 }
 
-// The report the freeze dialog shows. Each section below is rendered
-// by its own function, and they all only ever add to the end, so this
-// is what they are handed instead of the element itself: the three
-// line helpers are then written once rather than once per section.
-// `append` is for the few places that build a node of their own.
 interface IReport {
   node: HTMLDivElement;
   addLine: (text: string) => void;
@@ -83,17 +71,12 @@ interface IReport {
   append: (child: HTMLElement) => void;
 }
 
-// The server says a package was installed by the user either from the
-// baseline the image build recorded, which is exact, or — when the
-// image has no baseline — from file timestamps, which is a guess. The
-// report has to say which, so this is the value that means "exact".
+// The server's `provenance_method` is either this, an exact baseline
+// recorded at image build, or a guess read from file timestamps.
 const BASELINE_PROVENANCE = 'baseline';
 
 const warnColor = 'var(--jp-warn-color1, #d9822b)';
 
-// The freeze and the package each report the same two failures in
-// the same words — only the verb and the directory change — so that
-// wording is written once here.
 const unreachableMessage = (verb: string, target: string) =>
   'Could not reach the server to ' +
   verb +
@@ -101,9 +84,8 @@ const unreachableMessage = (verb: string, target: string) =>
   (target || '/') +
   '". Check that you are still connected and try again.';
 
-// HTTP/2 dropped the reason phrase, so statusText is an empty string
-// on most servers now and appending it unconditionally would leave a
-// dangling space inside the brackets: "(HTTP 500 )".
+// HTTP/2 dropped the reason phrase, so statusText is usually empty and
+// appending it unconditionally would give "(HTTP 500 )".
 const httpFailureMessage = (verb: string, target: string, response: Response) =>
   'The server could not ' +
   verb +
@@ -127,10 +109,6 @@ const logHttpFailure = (url: string, response: Response) =>
       response.statusText
   );
 
-// Returns null when the request never reached the server. Where
-// that gets reported is the caller's business: the freeze itself
-// uses a dialog, the button in the report writes into its own
-// status line.
 const freezeRequest = async (
   url: string,
   init: RequestInit
@@ -147,9 +125,6 @@ const freezeRequest = async (
   }
 };
 
-// Both buttons further down report into a status line under
-// themselves, in the same two looks: plain while something is
-// happening, bold warn colour when it failed.
 const statusWriter = (node: HTMLElement) => (text: string, warn?: boolean) => {
   node.textContent = text;
   node.style.color = warn ? warnColor : '';
@@ -158,10 +133,6 @@ const statusWriter = (node: HTMLElement) => (text: string, warn?: boolean) => {
 
 const formatVersion = (value: string | null) => value || 'unspecified';
 
-// "cartopy and pandas", "netCDF4, scipy and xarray". The user is
-// being told to go and move these by hand, so the list is written
-// the way the instruction would be spoken rather than as a bare
-// comma-separated run.
 const formatPackageList = (packages: string[]): string => {
   if (packages.length === 0) {
     return 'its packages';
@@ -174,9 +145,8 @@ const formatPackageList = (packages: string[]): string => {
   );
 };
 
-// The server names the file in Content-Disposition so the tester
-// gets the name the instructions mention. Anything unexpected in
-// that header falls back to a plain name rather than failing.
+// The server names the zip in Content-Disposition; an unparseable header
+// falls back to a plain name rather than failing the download.
 const filenameFrom = (disposition: string | null) => {
   const match = /filename="?([^";]+)"?/i.exec(disposition || '');
   const name = match ? match[1].trim() : '';
@@ -189,10 +159,8 @@ const createReport = (): IReport => {
   body.style.overflow = 'auto';
   body.style.whiteSpace = 'pre-wrap';
 
-  // A long report scrolls, and unless the dialog happens to offer a
-  // download button it holds nothing focusable, so without this a
-  // keyboard user cannot reach the scroll container to read past the
-  // first screenful.
+  // The report scrolls but often holds nothing focusable, so without this
+  // a keyboard user cannot reach the scroll container.
   body.tabIndex = 0;
 
   const addLine = (text: string) => {
@@ -231,10 +199,7 @@ const createReport = (): IReport => {
   };
 };
 
-// Renders one conflict as a summary line, a button per candidate
-// version, and — once a candidate is picked — the exact edit that
-// makes the conflict go away. Nothing is sent to the server and no
-// file is touched; this is advice for the user to apply by hand.
+// Nothing is sent to the server: picking a version only prints an edit.
 const addConflictBlock = (report: IReport, conflict: IFreezeConflict) => {
   const block = document.createElement('div');
   block.style.marginBottom = '8px';
@@ -261,9 +226,6 @@ const addConflictBlock = (report: IReport, conflict: IFreezeConflict) => {
 
   const instruction = document.createElement('div');
   instruction.style.marginTop = '4px';
-
-  // The edit to make appears here only once a version is picked, so
-  // it is new text arriving in a place the user is not looking at.
   instruction.setAttribute('role', 'status');
 
   block.appendChild(summary);
@@ -277,9 +239,6 @@ const addConflictBlock = (report: IReport, conflict: IFreezeConflict) => {
     const button = document.createElement('button');
     button.className = 'jp-mod-styled';
     button.textContent = 'Keep ' + version + ' (' + fromFile + ')';
-
-    // Which version is picked is otherwise said only in colour and
-    // weight, neither of which is announced.
     button.setAttribute('aria-pressed', 'false');
 
     button.addEventListener('click', () => {
@@ -368,27 +327,15 @@ const renderDockerfile = (
   } else {
     const notebookInstalls = snapshot.notebook_installs || [];
 
-    // The conflict check has to come first here because it comes
-    // first on the server: a directory with both a conflict and a
-    // notebook install is blocked on the conflict, and the sentence
-    // the server wrote says so. Asking for the installs to be moved
-    // instead would send the user off to edit every notebook and
-    // leave them blocked by the same conflict afterwards.
+    // Conflicts are checked first because _dockerfile_block_reason checks
+    // them first: a directory with both is blocked on the conflict.
     if (conflicts.length === 0 && notebookInstalls.length > 0) {
-      // The block was caused by notebooks installing their own
-      // packages, and the server has named every one of them. That
-      // is a to-do list — one edit per notebook — so it is rendered
-      // as a list. The prose sentence below would make the user
-      // reread it to work out which file to open first.
       report.addConflictLine('Changes needed before this can be frozen:');
 
       notebookInstalls.forEach(install => {
         const line = document.createElement('div');
         line.style.color = warnColor;
 
-        // The notebook name carries the same weight it has in the
-        // Notebooks section, so a user scanning for a filename
-        // finds it in the same shape in both places.
         const name = document.createElement('span');
         name.textContent = install.name;
         name.style.fontWeight = '600';
@@ -407,11 +354,8 @@ const renderDockerfile = (
 
       report.addLine('Install them in this environment, then freeze again.');
     } else {
-      // Everything else the server refuses on — a version conflict,
-      // a missing image spec — is a single sentence it already
-      // wrote, and there is no per-file list to draw. There is
-      // always a sentence: the Dockerfile goes unwritten only when
-      // the server refused, and a refusal always carries its reason.
+      // The server leaves dockerfile_written null only when it refused,
+      // and every refusal carries its reason.
       if (snapshot.dockerfile_blocked) {
         report.addConflictLine(snapshot.dockerfile_blocked);
       }
@@ -423,9 +367,7 @@ const renderDockerfile = (
   }
 };
 
-// Fetches the handover package and hands it to the browser. Every
-// outcome, good or bad, is written into the caller's status line; the
-// caller owns the button and re-enables it when this settles.
+// The caller owns the button and re-enables it when this settles.
 const downloadBundle = async (
   path: string,
   setStatus: (text: string, warn?: boolean) => void
@@ -457,8 +399,6 @@ const downloadBundle = async (
       return;
     }
 
-    // A refusal is a failure like any other here, so it is written
-    // in the same warn colour rather than reading as progress.
     setStatus(
       blocked.reason || 'The server cannot package this directory.',
       true
@@ -487,8 +427,6 @@ const downloadBundle = async (
   const filename = filenameFrom(response.headers.get('Content-Disposition'));
   const savedCopy = response.headers.get('X-Icos-Freeze-Saved');
 
-  // A throwaway link is the only way to hand a blob to the
-  // browser's own download machinery; it never joins the layout.
   const objectUrl = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = objectUrl;
@@ -497,9 +435,8 @@ const downloadBundle = async (
   link.click();
   link.remove();
 
-  // The click only queues the download. Revoking in the same task
-  // has been enough to abort it in Firefox and Safari, so the URL is
-  // released in a later one, once the browser has taken the blob.
+  // Revoking in the same task has been enough to abort the queued
+  // download in Firefox and Safari, so the URL is released in a later one.
   window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
 
   setStatus(
@@ -531,20 +468,12 @@ const renderPackage = (
 
     const packageStatus = document.createElement('div');
     packageStatus.style.marginTop = '4px';
-
-    // Everything this line ever says arrives after a click, well away
-    // from where the user is looking.
     packageStatus.setAttribute('role', 'status');
     report.append(packageStatus);
 
     const setPackageStatus = statusWriter(packageStatus);
 
-    // The dialog stays open and usable while this runs: the click
-    // handler returns immediately and the download writes into the
-    // status line once the server answers. Downloading a second time
-    // is harmless and people do retry, so the button comes back
-    // however the attempt ended — including a throw, which the
-    // separate re-enables on each failure path could not cover.
+    // `finally` brings the button back however the attempt ended.
     packageButton.addEventListener('click', () => {
       packageButton.disabled = true;
       void downloadBundle(snapshotPath, setPackageStatus).finally(() => {
@@ -607,11 +536,8 @@ const renderEnvironment = (report: IReport, snapshot: IFreezeSnapshot) => {
     );
   }
 
-  // Without a baseline the server works the list out from file
-  // timestamps, which cannot tell a late layer of the image's own
-  // build from something the user installed. Both branches above then
-  // state as fact what was inferred, so the generated Dockerfile's own
-  // caveat is repeated here rather than left for whoever opens it.
+  // Timestamps cannot tell a late layer of the image's own build from a
+  // user install, so the generated Dockerfile's caveat is repeated here.
   if (
     snapshot.provenance_method &&
     snapshot.provenance_method !== BASELINE_PROVENANCE
@@ -672,27 +598,18 @@ const freeze: JupyterFrontEndPlugin<void> = {
   autoStart: true,
   requires: [IDefaultFileBrowser],
   activate: (app: JupyterFrontEnd, fileBrowser: IDefaultFileBrowser) => {
-    // The button is built at the end of this activate, well after the
-    // snapshot code that has to drive it, so the nodes are parked here
-    // and every use below is null-safe: a freeze started from the
-    // command palette before the shell has added the button simply has
-    // nothing to update.
+    // The button is built at the end of this activate, so these stay
+    // null-checked: a palette freeze can run before the button exists.
     let freezeButtonNode: HTMLButtonElement | null = null;
     let freezeLabelNode: HTMLSpanElement | null = null;
     let freezeInFlight = false;
 
-    // While a freeze runs the whole window ices over and stops taking
-    // clicks. This is the primary signal that something is happening:
-    // the button's own busy state is up in the top bar, which is not
-    // where the user is looking after they click. The overlay is parked
-    // here and built on first use, then reused.
+    // The ice is the primary signal that a freeze is running: the button's
+    // own busy state is up in the top bar, out of view after a click.
     let freezeOverlayNode: HTMLDivElement | null = null;
     let freezeOverlayTextNode: HTMLDivElement | null = null;
     let freezeOverlayTimer: number | null = null;
 
-    // A freeze takes a few seconds and the wait is the same every time,
-    // so the overlay says something different on each run. The line is
-    // picked when the ice comes up and holds until it thaws.
     const FREEZE_PHRASES = [
       'Putting your notebooks on ice...',
       'Cryogenically preserving your code...',
@@ -723,18 +640,12 @@ const freeze: JupyterFrontEndPlugin<void> = {
       overlay.setAttribute('role', 'status');
       overlay.setAttribute('aria-live', 'polite');
 
-      // The ice is decorative and has nothing to say to a screen
-      // reader, which should only hear the word below it.
       const frost = document.createElement('div');
       frost.className = 'icos-freeze-overlay-frost';
       frost.setAttribute('aria-hidden', 'true');
       overlay.appendChild(frost);
 
-      // Snow over the ice. It is one node and the drift is entirely in
-      // the stylesheet — no flake is its own element and nothing here
-      // runs per frame, so a freeze that takes half a minute costs the
-      // same as one that takes a second. Inserted before the text so it
-      // paints under the plate.
+      // One node, drift entirely in the stylesheet: nothing runs per frame.
       const blizzard = document.createElement('div');
       blizzard.className = 'icos-freeze-overlay-blizzard';
       blizzard.setAttribute('aria-hidden', 'true');
@@ -750,14 +661,9 @@ const freeze: JupyterFrontEndPlugin<void> = {
       return overlay;
     };
 
-    // transitionend is the natural cue to take the node back out, but
-    // it is not guaranteed: reduced motion turns the transition off,
-    // a background tab may never run it, and an interrupted one is
-    // simply dropped. Any of those would leave the screen iced over
-    // with every click swallowed, which locks the user out of Lab
-    // entirely. The timeout is the way out of that; whichever of the
-    // two lands first cancels the other, and so does a freeze that
-    // starts while the ice is still fading.
+    // transitionend is not guaranteed: the stylesheet drops the transition
+    // under prefers-reduced-motion, a background tab may never run it, and
+    // an interrupted one is dropped — so a timeout backs it up.
     const cancelFreezeOverlayTeardown = () => {
       if (freezeOverlayTimer !== null) {
         window.clearTimeout(freezeOverlayTimer);
@@ -774,8 +680,7 @@ const freeze: JupyterFrontEndPlugin<void> = {
     const removeFreezeOverlay = () => {
       cancelFreezeOverlayTeardown();
 
-      // A freeze started again during the fade out re-adds the class,
-      // and in that case the node has to stay.
+      // A freeze started again during the fade out re-adds the class.
       if (
         freezeOverlayNode &&
         !freezeOverlayNode.classList.contains('is-visible')
@@ -784,10 +689,8 @@ const freeze: JupyterFrontEndPlugin<void> = {
       }
     };
 
-    // One listener for the life of the plugin rather than one per
-    // teardown: re-registering the same function on the same node does
-    // nothing, so an interrupted teardown cannot leave a stale one
-    // behind on the node, which is reused between freezes.
+    // One function for the life of the plugin: re-registering the same
+    // listener on the same node is a no-op, and the node is reused.
     const onFreezeOverlayTransitionEnd = (event: TransitionEvent) => {
       if (
         event.target === freezeOverlayNode &&
@@ -798,32 +701,26 @@ const freeze: JupyterFrontEndPlugin<void> = {
     };
 
     const setFreezeOverlay = (visible: boolean) => {
-      // Whichever direction we are going, any pending teardown from the
-      // previous freeze is now stale.
+      // Any pending teardown from the previous freeze is now stale.
       cancelFreezeOverlayTeardown();
 
       if (visible) {
         const overlay = ensureFreezeOverlay();
 
         if (!overlay.isConnected) {
-          // document.body, not the shell, so the ice also covers the
-          // menu bar and both sidebars.
+          // document.body, not the shell: the ice covers the menu bar too.
           document.body.appendChild(overlay);
         }
 
-        // The node is reused between freezes, so the line is redrawn
-        // each time rather than only when it is built.
+        // The node is reused between freezes, so the line is redrawn here.
         if (freezeOverlayTextNode) {
           freezeOverlayTextNode.textContent = freezePhrase();
         }
 
         document.body.setAttribute('aria-busy', 'true');
 
-        // The class has to land in a later frame than the insert. In the
-        // same frame the browser has no earlier opacity to transition
-        // from, so the ice would snap in instead of fading. Until it
-        // lands the overlay is transparent and, by the stylesheet, lets
-        // the pointer through, so these two frames block nothing.
+        // In the insert's own frame there is no earlier opacity to
+        // transition from and the ice would snap in, so the class lands later.
         window.requestAnimationFrame(() => {
           window.requestAnimationFrame(() => {
             if (freezeOverlayNode === overlay && overlay.isConnected) {
@@ -836,17 +733,13 @@ const freeze: JupyterFrontEndPlugin<void> = {
 
       document.body.removeAttribute('aria-busy');
 
-      // No node yet means no freeze has ever been shown, so there is
-      // nothing to fade out and nothing to build here either.
       const overlay = freezeOverlayNode;
       if (!overlay) {
         return;
       }
 
-      // Dropping the class both starts the fade and, by the stylesheet,
-      // stops the overlay taking the pointer: for the third of a second
-      // it spends fading it is a full-window sheet at z-index 100000
-      // that must not swallow clicks on whatever is underneath.
+      // Dropping the class stops the overlay taking the pointer: for the
+      // 320ms of the fade it is a full-window sheet over live UI.
       overlay.classList.remove('is-visible');
 
       if (!overlay.isConnected) {
@@ -866,17 +759,12 @@ const freeze: JupyterFrontEndPlugin<void> = {
         freezeLabelNode.textContent = busy ? 'Freezing…' : 'Freeze';
       }
 
-      // One place knows about the busy state, so the ice and the button
-      // can never disagree about whether a freeze is running.
       setFreezeOverlay(busy);
     };
 
-    // The ice comes down before the dialog goes up. JupyterLab draws
-    // dialogs at z-index 10000 and the overlay sits at 100000, so an
-    // error raised while a freeze is still marked busy would render
-    // behind the frost with every click on it swallowed — and the
-    // freeze is over by then anyway. Clearing it twice is harmless:
-    // captureSnapshot clears it again in its finally.
+    // The ice comes down before the dialog goes up: JupyterLab draws
+    // dialogs at z-index 10000 and the overlay sits at 100000, so an error
+    // shown while still busy would sit behind the frost, unclickable.
     const showFreezeError = (message: string) => {
       setFreezeBusy(false);
 
@@ -916,10 +804,8 @@ const freeze: JupyterFrontEndPlugin<void> = {
         return;
       }
 
-      // The server echoes back the path it was asked for, not the
-      // directory it actually walked, so that is what every message and
-      // both follow-up requests use, falling back to the requested path
-      // and then to the root.
+      // The server echoes back the path it was asked for, not the directory
+      // it walked, so this falls back to the requested path and then root.
       const snapshotPath = snapshot.path || path;
       const directory = snapshotPath || '/';
       const conflicts = snapshot.conflicts || [];
@@ -933,10 +819,8 @@ const freeze: JupyterFrontEndPlugin<void> = {
       renderDependencyFiles(report, snapshot.requirements || []);
       renderNotebooks(report, snapshot.notebooks || []);
 
-      // The freeze itself is finished the moment the report is ready, so
-      // the button stops reading "Freezing…" here rather than waiting for
-      // the dialog to be dismissed. The wrapper clears it again in its
-      // finally, which is harmless.
+      // The freeze is over once the report is ready, so the button resets
+      // here rather than when the dialog is dismissed.
       setFreezeBusy(false);
 
       await showDialog({
@@ -946,14 +830,9 @@ const freeze: JupyterFrontEndPlugin<void> = {
       });
     };
 
-    // A freeze makes the server scan the whole environment, which takes
-    // a few seconds. Every entry point goes through here — the button
-    // and both palette commands — so a second request cannot start
-    // while one is still running, whichever way it was asked for. The
-    // busy state is cleared in a finally, so a thrown request can never
-    // leave the button stuck on "Freezing…", and because the result
-    // dialog is awaited inside, the button only comes back once that
-    // dialog is dismissed.
+    // The button and both palette commands all funnel through here, so a
+    // second request cannot start while one is running. The finally is a
+    // backstop: a throw would otherwise leave the button on "Freezing…".
     const captureSnapshot = async (path: string) => {
       if (freezeInFlight) {
         return;
@@ -989,9 +868,7 @@ const freeze: JupyterFrontEndPlugin<void> = {
       }
     });
 
-    // A real <button>, not a div with role="button": the browser then
-    // gives focus, Enter and Space activation and the correct screen
-    // reader announcement for free, with no key handling of our own.
+    // A real <button>: focus and Enter/Space activation come for free.
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'icos-freeze-button';
@@ -1005,10 +882,8 @@ const freeze: JupyterFrontEndPlugin<void> = {
     freezeButtonNode = button;
     freezeLabelNode = label;
 
-    // Everything captureSnapshot expects to go wrong is reported in a
-    // dialog, but anything it did not expect would otherwise be an
-    // unhandled rejection with nothing on screen and nothing in the
-    // console to explain the button that just stopped responding.
+    // captureSnapshot dialogs everything it expects to go wrong; without
+    // this, anything it did not would be a silent unhandled rejection.
     button.addEventListener('click', () => {
       void captureSnapshot(fileBrowser.model.path).catch(error =>
         console.error('Freeze: the freeze failed', error)
@@ -1018,13 +893,10 @@ const freeze: JupyterFrontEndPlugin<void> = {
     const freezeButton = new Widget({ node: button });
     freezeButton.id = 'icos-freeze-button';
 
-    // The shell puts the main menu bar in the top area at rank 100
-    // (`this.add(this._menuHandler.panel, 'top', { rank: 100 })` in
-    // @jupyterlab/application/lib/shell.js), and the top area's
-    // PanelHandler inserts with ArrayExt.upperBound, so equal ranks land
-    // after what is already there. Rank 101 therefore puts Freeze
-    // immediately to the right of the menu bar and still well ahead of
-    // the shell's DEFAULT_RANK of 900.
+    // The shell adds the main menu bar to the top area at rank 100
+    // (@jupyterlab/application/lib/shell.js), and the top area inserts with
+    // ArrayExt.upperBound, so equal ranks land after. Rank 101 puts Freeze
+    // right of the menu bar, well ahead of the shell's DEFAULT_RANK of 900.
     app.shell.add(freezeButton, 'top', { rank: 101 });
   }
 };

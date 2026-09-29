@@ -7,10 +7,6 @@ import { Dialog, ISplashScreen } from '@jupyterlab/apputils';
 import { Throttler } from '@lumino/polling';
 import { DisposableDelegate } from '@lumino/disposable';
 
-/* ------------------------------------------
-   Splash Screen
-------------------------------------------- */
-
 const SPLASH_RECOVER_TIMEOUT = 12000;
 
 namespace CommandIDs {
@@ -66,9 +62,6 @@ Would you like to clear the workspace or keep waiting?`,
           ]
         });
 
-        // The dialog is cleared in a finally: an error out of launch()
-        // used to leave it set, and the guard above then silenced every
-        // later prompt for the rest of the session.
         try {
           const result = await dialog.launch();
           if (result.button.accept && commands.hasCommand(CommandIDs.reset)) {
@@ -80,6 +73,7 @@ Would you like to clear the workspace or keep waiting?`,
         } catch {
           /* no-op */
         } finally {
+          // If this is not reset to null, the prompt never opens again.
           dialog?.dispose();
           dialog = null;
         }
@@ -89,10 +83,8 @@ Would you like to clear the workspace or keep waiting?`,
 
     let splashCount = 0;
 
-    // The fade out removes the node 200ms after the last splash is
-    // disposed. A show() inside that window re-appends the node, and
-    // without this handle the pending removal would then tear the
-    // visible splash back off the page.
+    // A show() inside the 200ms fade re-appends the node, and without this
+    // handle the pending removal would tear it back off the page.
     let removalTimer: number | null = null;
 
     return {
@@ -117,9 +109,8 @@ Would you like to clear the workspace or keep waiting?`,
               dialog = null;
             }
             splash.classList.add('splash-fade');
-            // remove() rather than document.body.removeChild(): it is a
-            // no-op on a node that is already detached, where removeChild
-            // would throw inside the timer with nothing to catch it.
+            // remove() rather than removeChild(): a no-op on an already
+            // detached node, where removeChild would throw in the timer.
             removalTimer = window.setTimeout(() => {
               removalTimer = null;
               splash.remove();

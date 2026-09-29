@@ -3,17 +3,11 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 
-/* ------------------------------------------
-  Sidebar ICOS HUB + Popup + Tooltip
-------------------------------------------- */
-
 const POPUP_ID = 'icos-pinned-popup';
 const TOOLTIP_ID = 'icos-hub-tooltip';
 
-// How long to wait for the left sidebar before giving up. JupyterLab
-// builds it during startup, so a second is generous; polling past that
-// means it is never coming and the timer would otherwise run for the
-// life of the page.
+// app.restored does not guarantee the left tab bar is in the DOM yet, so
+// the injection is retried; ten seconds is far longer than startup takes.
 const INJECT_RETRY_MS = 100;
 const INJECT_MAX_ATTEMPTS = 100;
 
@@ -91,10 +85,6 @@ const sidebar: JupyterFrontEndPlugin<void> = {
            <div style="font-size:10px; opacity:0.85;">⏹ <strong>Stop My Server</strong> → ▶ <strong>Start My Server</strong></div>`
         : '<div style="font-weight:600;">Click here to manage your environment.</div>';
 
-      // The popup and the tooltip are the same panel: same styling,
-      // same arrow, same placement beside the tab. Only what makes them
-      // appear differs, so the panel is built once here and each of the
-      // two is that panel plus its own trigger.
       const createHubPanel = (id: string) => {
         const panel = document.createElement('div');
         panel.id = id;
@@ -138,9 +128,6 @@ const sidebar: JupyterFrontEndPlugin<void> = {
           arrow.style.left = '-6px';
         };
 
-        // Repositioning only matters while the panel is on screen, and
-        // the listeners carry the injection's abort signal so a second
-        // injection cannot leave the first one's handlers behind.
         const reposition = () => {
           if (panel.style.display !== 'none') {
             position();
@@ -159,6 +146,9 @@ const sidebar: JupyterFrontEndPlugin<void> = {
         const revealPopup = () => {
           popup.classList.add('icos-popup-live');
           popup.style.display = '';
+          // position() measures the tab and the panel, and this runs just as
+          // the splash goes and the tab is inserted, so the read waits for
+          // layout. The tooltip can position synchronously: nothing moves.
           requestAnimationFrame(() => requestAnimationFrame(() => position()));
           popup.addEventListener('click', () => {
             popup.style.display = 'none';
@@ -178,6 +168,9 @@ const sidebar: JupyterFrontEndPlugin<void> = {
           });
         };
 
+        // The popup hides itself three seconds after it appears, so showing
+        // it behind the splash would burn that window. #icos-splash is the
+        // splash plugin's node, added to and removed from document.body.
         if (!document.getElementById('icos-splash')) {
           revealPopup();
         } else {
