@@ -67,7 +67,7 @@ Be aware of what the check does not see. It reads the text of your
 notebooks and nothing else. An install hidden behind `subprocess`, one
 written as `!python -m pip install`, or a command assembled in a variable
 all slip past it, and it does not care whether the cell was ever run.
-Those installs still break a rebuild — they are simply not caught.
+Those installs still break a rebuild. They are simply not caught.
 
 The report lists one line per notebook, naming the packages to move.
 
@@ -86,11 +86,11 @@ this on the ICOS hub, report it.
 
 The package is a zip holding:
 
-- `Dockerfile` — rebuilds the environment
-- `.dockerignore` — what to leave out of the build
-- `docker-compose.yml` — builds and runs it with one command
-- `icos-freeze.json` — what was frozen, and from which image
-- `README.md` — the commands the tester runs
+- `Dockerfile`: rebuilds the environment
+- `.dockerignore`: what to leave out of the build
+- `docker-compose.yml`: builds and runs it with one command
+- `icos-freeze.json`: what was frozen, and from which image
+- `README.md`: the commands the tester runs
 - your notebooks
 - your dependency files
 
@@ -133,6 +133,6 @@ docker run --rm <tag> pip list
 
 The README writes the real image tag into that command, so it can be
 pasted as it stands. The manifest is read from the unpacked package on
-the tester's own machine, not from inside the container — the image does
+the tester's own machine, not from inside the container. The image does
 not carry it. Every package under `user_installed` should be in that
 list, at the version the manifest records.

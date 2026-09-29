@@ -1028,7 +1028,7 @@ def _provenance_comments(method):
         ]
 
     return [
-        "# Provenance: file timestamps — no package baseline was found"
+        "# Provenance: file timestamps. No package baseline was found"
         " in this",
         "# image. Timestamps cannot tell a late layer of the image's own"
         " build from",
@@ -1238,7 +1238,7 @@ def _generate_dockerignore():
         "# The frozen directory is the build context. These entries are"
         " checkout",
         "# state, caches, handover packages and the build scaffolding"
-        " itself — the",
+        " itself. The",
         "# Dockerfile, this file and the compose file describe how the"
         " image is",
         "# built and run, so none of them belongs inside it.",
@@ -1549,10 +1549,10 @@ def _generate_bundle_readme(
         "",
         "## What is in this package",
         "",
-        f"- `{DOCKERFILE_NAME}`, `{DOCKERIGNORE_NAME}` — the build context",
-        f"- `{BUNDLE_COMPOSE_NAME}` — brings the environment up with one"
+        f"- `{DOCKERFILE_NAME}`, `{DOCKERIGNORE_NAME}`: the build context",
+        f"- `{BUNDLE_COMPOSE_NAME}`: brings the environment up with one"
         " command",
-        f"- `{MANIFEST_NAME}` — what was frozen, and from which image",
+        f"- `{MANIFEST_NAME}`: what was frozen, and from which image",
         f"- Notebooks: {', '.join(notebooks) if notebooks else 'none'}",
         "- Dependency files:"
         f" {', '.join(requirements) if requirements else 'none'}",

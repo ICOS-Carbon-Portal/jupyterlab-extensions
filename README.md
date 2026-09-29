@@ -4,14 +4,14 @@ A JupyterLab extension for the ICOS Carbon Portal.
 
 ## What it does
 
-- **Splash** (`@icos-ext/splash`) — replaces the JupyterLab startup
+- **Splash** (`@icos-ext/splash`): replaces the JupyterLab startup
   screen with an animated ICOS Carbon Portal one.
-- **Sidebar** (`@icos-ext/sidebar`) — adds an "ICOS HUB" tab to the
+- **Sidebar** (`@icos-ext/sidebar`): adds an "ICOS HUB" tab to the
   left sidebar that opens the hub home page in a new tab, with a short
   popup pointing at it.
-- **Tracker** (`@icos-ext/tracker`) — reports every notebook cell run
+- **Tracker** (`@icos-ext/tracker`): reports every notebook cell run
   to Matomo, so the portal can see how notebooks are used.
-- **Freeze** (`@icos-ext/freeze`) — a Freeze button in the top bar
+- **Freeze** (`@icos-ext/freeze`): a Freeze button in the top bar
   turns a notebook directory into a package someone else can build and
   run. See [Freezing a notebook directory](docs/freeze.md).
 
@@ -37,5 +37,5 @@ freeze:
 docker compose up --build
 ```
 
-Lab is then at `http://localhost:8888/lab` — no token, and bound to
-the loopback so only this machine can reach it.
+Lab is then at `http://localhost:8888/lab`. It asks for no token, and
+it is bound to the loopback, so only this machine can reach it.
