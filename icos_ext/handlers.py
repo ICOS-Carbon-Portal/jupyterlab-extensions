@@ -102,12 +102,6 @@ DOCKERIGNORE_ENTRIES = (
 BUNDLE_README_NAME = "README.md"
 BUNDLE_COMPOSE_NAME = "docker-compose.yml"
 
-# The token the compose file fixes for the lab service. A frozen
-# environment is handed to one person to check, not published, so a
-# token that can be written into the README costs nothing worth
-# keeping and saves the tester a trip to the container log.
-BUNDLE_COMPOSE_TOKEN = "frozen"
-
 # The host port the compose file publishes the lab on. Not 8888: the
 # person freezing is already running JupyterLab on that port, so the
 # frozen copy has to land somewhere else — otherwise the container
@@ -1435,10 +1429,7 @@ def _bundle_manifest(data):
 
 def _compose_url():
     """Return the URL the compose file's lab service answers on."""
-    return (
-        f"http://localhost:{BUNDLE_COMPOSE_PORT}"
-        f"/lab?token={BUNDLE_COMPOSE_TOKEN}"
-    )
+    return f"http://localhost:{BUNDLE_COMPOSE_PORT}/lab"
 
 
 def _generate_compose(tag):
@@ -1448,9 +1439,10 @@ def _generate_compose(tag):
     work in, built from the Dockerfile beside it, so the tester builds
     once and works in exactly what was frozen.
 
-    JUPYTER_TOKEN is fixed rather than generated: it makes the URL
-    predictable enough to write into the README, instead of the tester
-    having to fish a one-time token out of the container log.
+    The lab asks for no token, so the tester opens the URL and is in.
+    The flag goes to the image's own startup script, which is what its
+    CMD runs. Nothing then stands between the port and the notebooks,
+    so the port is published on the loopback only.
     """
     return "\n".join([
         DOCKERFILE_HEADER,
@@ -1464,12 +1456,12 @@ def _generate_compose(tag):
         "  lab:",
         "    build: .",
         f"    image: {tag}",
+        "    # No token, so the URL above opens straight away. Bound to",
+        "    # 127.0.0.1, so only this machine can reach a JupyterLab",
+        "    # that asks for nothing.",
+        "    command: start-notebook.py --IdentityProvider.token=''",
         "    ports:",
-        f'      - "{BUNDLE_COMPOSE_PORT}:8888"',
-        "    environment:",
-        "      # Fixed on purpose, so the URL above is the URL every",
-        "      # time; the container log does not have to be read.",
-        f'      JUPYTER_TOKEN: "{BUNDLE_COMPOSE_TOKEN}"',
+        f'      - "127.0.0.1:{BUNDLE_COMPOSE_PORT}:8888"',
     ]) + "\n"
 
 
@@ -1511,22 +1503,29 @@ def _generate_bundle_readme(
         "docker compose up --build",
         "```",
         "",
-        f"Then open {_compose_url()}. The notebooks are at"
-        " `/home/jovyan/work` inside the container. The token is fixed"
-        f" in `{BUNDLE_COMPOSE_NAME}`, so that URL is the same every"
-        " time.",
+        f"Then open {_compose_url()}. There is no token to enter and"
+        " nothing to copy out of a log: the page opens straight into"
+        " JupyterLab. The notebooks are at `/home/jovyan/work` inside"
+        " the container.",
+        "",
+        "Because it asks for nothing, the port is published on"
+        " `127.0.0.1` only. The environment is reachable from this"
+        " machine and nowhere else.",
         "",
         "Without compose:",
         "",
         "```bash",
         f"docker build -t {tag} .",
-        f"docker run --rm -p {BUNDLE_COMPOSE_PORT}:8888 {tag}",
+        f"docker run --rm -p 127.0.0.1:{BUNDLE_COMPOSE_PORT}:8888"
+        f" {tag} \\",
+        "    start-notebook.py --IdentityProvider.token=''",
         "```",
         "",
-        "Run that way, JupyterLab prints its URL, with a one-time token"
-        " in it, to the container log as it starts. That URL carries the"
-        " container's own port, so open it with the host port instead:"
-        f" `http://localhost:{BUNDLE_COMPOSE_PORT}/lab?token=...`.",
+        "That is the same environment on the same terms: open"
+        f" {_compose_url()} and you are in, with no token, and only from"
+        " this machine. The URL JupyterLab prints to the container log"
+        " carries the container's own port, so use the one above"
+        " instead.",
         "",
         "## What to check",
         "",

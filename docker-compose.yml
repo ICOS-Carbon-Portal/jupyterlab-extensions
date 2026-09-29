@@ -5,10 +5,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # No token: open the URL and you are in. Bound to the loopback, so
+    # only this machine can reach a Lab that asks for nothing.
+    command: start-notebook.py --IdentityProvider.token=''
     ports:
-      - "8888:8888"
+      - "127.0.0.1:8888:8888"
     environment:
-      JUPYTER_TOKEN: "icos"
       JUPYTER_IMAGE_SPEC: "${JUPYTER_IMAGE_SPEC:-quay.io/jupyter/datascience-notebook@sha256:8040395c8534cdf96388c20a85a2e89a259dbce057e67d6fd7577c2a9beea5c3}"
     user: root
     volumes:

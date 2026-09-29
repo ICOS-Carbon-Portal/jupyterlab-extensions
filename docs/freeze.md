@@ -114,9 +114,9 @@ directory:
 docker compose up --build
 ```
 
-JupyterLab is then at `http://localhost:8899/lab?token=frozen`. The
-notebooks are at `/home/jovyan/work` inside the container. The token is
-fixed, so that address is the same every time.
+JupyterLab is then at `http://localhost:8899/lab`. It asks for no
+token, and it listens on this machine only. The notebooks are at
+`/home/jovyan/work` inside the container.
 
 The check itself is done by hand, and the README in the package spells
 it out. The tester opens the notebooks in the running container and runs
