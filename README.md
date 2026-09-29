@@ -2,14 +2,23 @@
 
 A JupyterLab extension for the ICOS Carbon Portal.
 
-- Custom ICOS Carbon Portal splash screen on JupyterLab startup
-- "ICOS HUB" sidebar button that opens the ICOS Carbon Portal Hub
-- Notebook execution tracking — sends analytics to Matomo on every cell run
+## What it does
+
+- **Splash** (`@icos-ext/splash`) — replaces the JupyterLab startup
+  screen with an animated ICOS Carbon Portal one.
+- **Sidebar** (`@icos-ext/sidebar`) — adds an "ICOS HUB" tab to the
+  left sidebar that opens the hub home page in a new tab, with a short
+  popup pointing at it.
+- **Tracker** (`@icos-ext/tracker`) — reports every notebook cell run
+  to Matomo, so the portal can see how notebooks are used.
+- **Freeze** (`@icos-ext/freeze`) — a Freeze button in the top bar
+  turns a notebook directory into a package someone else can build and
+  run. See [Freezing a notebook directory](docs/freeze.md).
 
 ## Requirements
 
-- JupyterLab >= 4.0
 - Python >= 3.8
+- JupyterLab >= 4.0, < 5
 - `jupyter_server` >= 2.0
 
 ## Install
@@ -17,3 +26,44 @@ A JupyterLab extension for the ICOS Carbon Portal.
 ```bash
 pip install git+https://github.com/ICOS-Carbon-Portal/jupyterlab-extensions.git
 ```
+
+## Local development
+
+### With Docker
+
+This builds a Lab container from the source in this repository and
+mounts `demo/` at `/home/jovyan/freeze_demo`, so there is something to
+freeze:
+
+```bash
+docker compose up --build
+```
+
+Lab is then at `http://localhost:8888/lab` — no token, and bound to
+the loopback so only this machine can reach it.
+
+### Without Docker
+
+`jlpm` is JupyterLab's pinned copy of Yarn, installed with JupyterLab.
+
+```bash
+pip install -e "."
+jupyter labextension develop . --overwrite
+jlpm install
+jlpm build
+```
+
+To rebuild as you edit, run this in one terminal and `jupyter lab` in
+another:
+
+```bash
+jlpm watch
+```
+
+## Server endpoints
+
+| Route                  | What it does                                      |
+| ---------------------- | ------------------------------------------------- |
+| `POST /icos-ext/track` | Reports one notebook execution to Matomo          |
+| `GET /icos-ext/freeze` | Snapshots the environment, writes a build context |
+| `GET /icos-ext/bundle` | Returns the frozen directory as a zip             |
