@@ -1768,11 +1768,12 @@ class FreezeHandler(APIHandler):
             "image": image,
             "python_version": snapshot["python_version"],
             "provenance_method": snapshot["provenance_method"],
-            # Names only. The content of each dependency file is
-            # collected for the conflict check and stays on the
+            # Names only, still one object per file so the shape matches
+            # every other list here. The content of each dependency file
+            # is collected for the conflict check and stays on the
             # server; nothing in the browser reads it.
             "requirements": [
-                item["name"] for item in snapshot["requirements"]
+                {"name": item["name"]} for item in snapshot["requirements"]
             ],
             "notebooks": snapshot["notebooks"],
             "environment": snapshot["environment"],
