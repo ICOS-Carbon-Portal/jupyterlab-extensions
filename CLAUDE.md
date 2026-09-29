@@ -7,12 +7,12 @@ Reference for Claude Code sessions in this repository.
 A JupyterLab 4.x extension for the ICOS Carbon Portal, packaged as
 `icos_ext`. It ships four plugins:
 
-| Plugin ID | Purpose |
-|---|---|
-| `@icos-ext/splash` | Replaces the default splash screen with a branded ICOS animation (pulsing circles, "ICOS / CARBON PORTAL" text) |
-| `@icos-ext/sidebar` | Injects an "ICOS HUB" tab into the left sidebar; opens `https://exploredata.icos-cp.eu/hub/home` and shows a popup guiding users back to environment selection |
-| `@icos-ext/tracker` | Hybrid (frontend + server) plugin that tracks notebook execution for analytics |
-| `@icos-ext/freeze` | Hybrid (frontend + server) plugin that turns a notebook directory into a rebuildable package: a Freeze button in the top bar, a report, a build context written beside the notebooks, and a downloadable zip |
+| Plugin ID           | Purpose                                                                                                                                                                                                      |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@icos-ext/splash`  | Replaces the default splash screen with a branded ICOS animation (pulsing circles, "ICOS / CARBON PORTAL" text)                                                                                              |
+| `@icos-ext/sidebar` | Injects an "ICOS HUB" tab into the left sidebar; opens `/hub/home` on the current origin and shows a popup guiding users back to environment selection                                                       |
+| `@icos-ext/tracker` | Hybrid (frontend + server) plugin that tracks notebook execution for analytics                                                                                                                               |
+| `@icos-ext/freeze`  | Hybrid (frontend + server) plugin that turns a notebook directory into a rebuildable package: a Freeze button in the top bar, a report, a build context written beside the notebooks, and a downloadable zip |
 
 ### `@icos-ext/tracker` details
 
@@ -139,3 +139,27 @@ python -m build      # outputs dist/icos_ext-*.whl and .tar.gz
   `./node_modules/.bin/` (`tsc`, `eslint`, `prettier`, `stylelint`,
   `webpack`) directly.
 - Plugin IDs follow the `@icos-ext/<plugin-name>` convention.
+
+## Commit messages
+
+One line, and nothing else. Lowercase `area - summary`, under 72
+characters, no body, no bullet list, no trailers — including no
+AI-attribution line. Recent examples:
+
+```text
+tsconfig - drop the unused jsx option
+docker - open lab without a token, on localhost only
+```
+
+## Comments
+
+A comment earns its place only if deleting it would let a later edit
+re-break something, or if it records a fact from outside the file — a
+browser quirk, a JupyterLab or Lumino internal, a value in
+`style/index.css`, something the server does or does not send. Anything
+that restates the code is deleted, however well written.
+
+- No section banner comments at the top of a file. The filename says it.
+- No archaeology. Describe the constraint that holds now, not a bug that
+  used to exist, and put the comment on the line it concerns.
+- `src/` sits at roughly 7% comment-to-code. That is the intended level.
