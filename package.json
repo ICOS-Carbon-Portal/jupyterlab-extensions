@@ -101,6 +101,7 @@
         "schemaDir": "schema"
     },
     "prettier": {
+        "printWidth": 100,
         "singleQuote": true,
         "trailingComma": "none",
         "arrowParens": "avoid",

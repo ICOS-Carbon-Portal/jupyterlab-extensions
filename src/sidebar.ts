@@ -1,7 +1,4 @@
-import {
-  JupyterFrontEnd,
-  JupyterFrontEndPlugin
-} from '@jupyterlab/application';
+import { JupyterFrontEnd, JupyterFrontEndPlugin } from '@jupyterlab/application';
 
 const POPUP_ID = 'icos-pinned-popup';
 const TOOLTIP_ID = 'icos-hub-tooltip';
@@ -17,9 +14,7 @@ const sidebar: JupyterFrontEndPlugin<void> = {
   activate: (app: JupyterFrontEnd) => {
     const cleanTabs = () => {
       document
-        .querySelectorAll(
-          '.jp-SideBar.jp-mod-left ul.lm-TabBar-content li.lm-TabBar-tab'
-        )
+        .querySelectorAll('.jp-SideBar.jp-mod-left ul.lm-TabBar-content li.lm-TabBar-tab')
         .forEach(tab => {
           const title = tab.getAttribute('title') || '';
           if (title.toLowerCase().includes('commands')) {
@@ -33,9 +28,7 @@ const sidebar: JupyterFrontEndPlugin<void> = {
     let injection: AbortController | null = null;
 
     const tryInject = (): boolean => {
-      const tabBar = document.querySelector(
-        '.jp-SideBar.jp-mod-left ul.lm-TabBar-content'
-      );
+      const tabBar = document.querySelector('.jp-SideBar.jp-mod-left ul.lm-TabBar-content');
       if (!tabBar) {
         return false;
       }
@@ -45,9 +38,7 @@ const sidebar: JupyterFrontEndPlugin<void> = {
       const { signal } = injection;
 
       tabBar.querySelectorAll('#icos-tab').forEach(el => el.remove());
-      document
-        .querySelectorAll('#' + POPUP_ID + ', #' + TOOLTIP_ID)
-        .forEach(el => el.remove());
+      document.querySelectorAll('#' + POPUP_ID + ', #' + TOOLTIP_ID).forEach(el => el.remove());
 
       const tab = document.createElement('li');
       tab.className = 'lm-TabBar-tab';
@@ -70,11 +61,9 @@ const sidebar: JupyterFrontEndPlugin<void> = {
       tab.appendChild(label);
       tabBar.appendChild(tab);
       tab.classList.add('icos-tab-highlight');
-      tab.addEventListener(
-        'animationend',
-        () => tab.classList.remove('icos-tab-highlight'),
-        { once: true }
-      );
+      tab.addEventListener('animationend', () => tab.classList.remove('icos-tab-highlight'), {
+        once: true
+      });
 
       /* ---------------- Pinned Popup ---------------- */
       const isExplore =
@@ -156,9 +145,7 @@ const sidebar: JupyterFrontEndPlugin<void> = {
           let popupTimeout = setTimeout(() => {
             popup.style.display = 'none';
           }, 3000);
-          popup.addEventListener('mouseenter', () =>
-            clearTimeout(popupTimeout)
-          );
+          popup.addEventListener('mouseenter', () => clearTimeout(popupTimeout));
           popup.addEventListener('mouseleave', () => {
             if (popup.style.display !== 'none') {
               popupTimeout = setTimeout(() => {
@@ -192,10 +179,7 @@ const sidebar: JupyterFrontEndPlugin<void> = {
           tooltip.style.display = 'block';
           position();
         });
-        tab.addEventListener(
-          'mouseleave',
-          () => (tooltip.style.display = 'none')
-        );
+        tab.addEventListener('mouseleave', () => (tooltip.style.display = 'none'));
       })();
 
       tab.addEventListener('click', () => {

@@ -1,7 +1,4 @@
-import {
-  JupyterFrontEnd,
-  JupyterFrontEndPlugin
-} from '@jupyterlab/application';
+import { JupyterFrontEnd, JupyterFrontEndPlugin } from '@jupyterlab/application';
 
 import { INotebookTracker, NotebookActions } from '@jupyterlab/notebook';
 import { PageConfig } from '@jupyterlab/coreutils';
@@ -35,9 +32,7 @@ const tracker: JupyterFrontEndPlugin<void> = {
           })
         },
         settings
-      ).catch(error =>
-        console.debug('Tracker: could not report ' + notebookPath, error)
-      );
+      ).catch(error => console.debug('Tracker: could not report ' + notebookPath, error));
     });
   }
 };
