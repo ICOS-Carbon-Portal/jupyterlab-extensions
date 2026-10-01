@@ -26,6 +26,10 @@ __pycache__/
 .idea/
 backup/
 
-# Local development, not part of the extension
-demo/
 .ipynb_checkpoints/
+
+# What a freeze of demo/ writes or downloads
+demo/Dockerfile
+demo/.dockerignore
+demo/icos-freeze.json
+demo/*.zip
