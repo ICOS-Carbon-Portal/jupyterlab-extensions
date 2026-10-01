@@ -44,12 +44,14 @@ it is bound to the loopback, so only this machine can reach it.
 
 ### Without Docker
 
-You need Node.js and JupyterLab 4. JupyterLab brings `jlpm`, its pinned
+You need Node.js 20.19 or newer and JupyterLab 4. The build fails on
+older Node versions, such as 18. JupyterLab brings `jlpm`, its pinned
 copy of Yarn; the build uses it, and so does your editor to find the
-extension's types.
+extension's types. The JupyterLab version below matches the one the
+ICOS hub image runs.
 
 ```bash
-pip install "jupyterlab>=4,<5"
+pip install "jupyterlab==4.5.6"
 jlpm install
 pip install -e "."
 jupyter labextension develop . --overwrite
