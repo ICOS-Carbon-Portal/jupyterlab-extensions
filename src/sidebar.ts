@@ -28,8 +28,8 @@ const sidebar: JupyterFrontEndPlugin<void> = {
     let injection: AbortController | null = null;
 
     const tryInject = (): boolean => {
-      const tabBar = document.querySelector('.jp-SideBar.jp-mod-left ul.lm-TabBar-content');
-      if (!tabBar) {
+      const tabList = document.querySelector('.jp-SideBar.jp-mod-left ul.lm-TabBar-content');
+      if (!tabList) {
         return false;
       }
 
@@ -37,15 +37,20 @@ const sidebar: JupyterFrontEndPlugin<void> = {
       injection = new AbortController();
       const { signal } = injection;
 
-      tabBar.querySelectorAll('#icos-tab').forEach(el => el.remove());
+      document.querySelectorAll('#icos-tab').forEach(el => el.remove());
       document.querySelectorAll('#' + POPUP_ID + ', #' + TOOLTIP_ID).forEach(el => el.remove());
 
-      const tab = document.createElement('li');
+      // Kept outside the ul: Lumino's virtual DOM re-renders that list on
+      // every tab change and throws on any child it did not create.
+      const tab = document.createElement('div');
       tab.className = 'lm-TabBar-tab';
       tab.id = 'icos-tab';
       tab.setAttribute('role', 'tab');
       tab.style.cursor = 'pointer';
       tab.title = 'Open Hub';
+      // JupyterLab's sidebar tab menu offers "Switch Sidebar Side", which
+      // cannot move this element; the attribute makes it skip the menu.
+      tab.dataset.jpSuppressContextMenu = '';
 
       const label = document.createElement('div');
       label.className = 'lm-TabBar-tabLabel';
@@ -59,7 +64,7 @@ const sidebar: JupyterFrontEndPlugin<void> = {
       label.style.fontWeight = 'bold';
       label.style.padding = '0 4px';
       tab.appendChild(label);
-      tabBar.appendChild(tab);
+      tabList.after(tab);
       tab.classList.add('icos-tab-highlight');
       tab.addEventListener('animationend', () => tab.classList.remove('icos-tab-highlight'), {
         once: true

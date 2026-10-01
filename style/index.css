@@ -115,6 +115,13 @@
   animation: icos-tab-glow 3.2s ease-in-out forwards;
 }
 
+/* JupyterLab's sidepanel.css pins the vertical tab list to one tab's height
+   and lets the tabs overflow it. #icos-tab sits after the list, not in it,
+   so the list has to grow for the tab to land below the last icon. */
+.jp-SideBar.jp-mod-left[data-orientation='vertical'] > .lm-TabBar-content {
+  height: auto;
+}
+
 @property --icos-popup-angle {
   syntax: '<angle>';
   initial-value: 0deg;
