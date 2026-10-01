@@ -29,6 +29,8 @@ pip install git+https://github.com/ICOS-Carbon-Portal/jupyterlab-extensions.git
 
 ## Local development
 
+### With Docker
+
 This builds a Lab container from the source in this repository and
 mounts `demo/` at `/home/jovyan/freeze_demo`, so there is something to
 freeze:
@@ -39,3 +41,20 @@ docker compose up --build
 
 Lab is then at `http://localhost:8888/lab`. It asks for no token, and
 it is bound to the loopback, so only this machine can reach it.
+
+### Without Docker
+
+You need Node.js and JupyterLab 4. JupyterLab brings `jlpm`, its pinned
+copy of Yarn; the build uses it, and so does your editor to find the
+extension's types.
+
+```bash
+pip install "jupyterlab>=4,<5"
+jlpm install
+pip install -e "."
+jupyter labextension develop . --overwrite
+jlpm build
+```
+
+To rebuild as you edit, run `jlpm watch` in one terminal and
+`jupyter lab` in another.
