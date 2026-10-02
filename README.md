@@ -53,10 +53,15 @@ ICOS hub image runs.
 ```bash
 pip install "jupyterlab==4.5.6"
 jlpm install
+jlpm clean:all
 pip install -e "."
 jupyter labextension develop . --overwrite
 jlpm build
 ```
 
+`jlpm clean:all` is there because an earlier build left in
+`icos_ext/labextension/` is reused as-is and Lab would run old code.
+
 To rebuild as you edit, run `jlpm watch` in one terminal and
-`jupyter lab` in another.
+`jupyter lab` in another. After each rebuild, hard-reload the browser
+(Ctrl+Shift+R) so it does not use cached files.
