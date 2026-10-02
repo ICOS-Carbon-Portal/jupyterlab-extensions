@@ -1,7 +1,4 @@
-import {
-  JupyterFrontEnd,
-  JupyterFrontEndPlugin
-} from '@jupyterlab/application';
+import { JupyterFrontEnd, JupyterFrontEndPlugin } from '@jupyterlab/application';
 
 import { Dialog, ISplashScreen } from '@jupyterlab/apputils';
 import { Throttler } from '@lumino/polling';
@@ -67,9 +64,7 @@ Would you like to clear the workspace or keep waiting?`,
           if (result.button.accept && commands.hasCommand(CommandIDs.reset)) {
             return commands.execute(CommandIDs.reset);
           }
-          requestAnimationFrame(
-            () => void recovery.invoke().catch(() => undefined)
-          );
+          requestAnimationFrame(() => void recovery.invoke().catch(() => undefined));
         } catch {
           /* no-op */
         } finally {
@@ -98,9 +93,7 @@ Would you like to clear the workspace or keep waiting?`,
         document.body.appendChild(splash);
         void recovery.invoke().catch(() => undefined);
         return new DisposableDelegate(async () => {
-          const minDisplay = new Promise<void>(resolve =>
-            setTimeout(resolve, 1500)
-          );
+          const minDisplay = new Promise<void>(resolve => setTimeout(resolve, 1500));
           await Promise.all([restored, minDisplay]);
           if (--splashCount === 0) {
             void recovery.stop();
