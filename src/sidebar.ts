@@ -1,4 +1,5 @@
-import { JupyterFrontEnd, JupyterFrontEndPlugin } from '@jupyterlab/application';
+import { ILabShell, JupyterFrontEnd, JupyterFrontEndPlugin } from '@jupyterlab/application';
+import { Widget } from '@lumino/widgets';
 
 const POPUP_ID = 'icos-pinned-popup';
 const TOOLTIP_ID = 'icos-hub-tooltip';
@@ -8,10 +9,33 @@ const TOOLTIP_ID = 'icos-hub-tooltip';
 const INJECT_RETRY_MS = 100;
 const INJECT_MAX_ATTEMPTS = 100;
 
+// The shell hides a side bar whose tab bar has no titles (SideBarHandler's
+// _refreshVisibility in @jupyterlab/application), and the hub tab would go
+// with it. This widget keeps one title on the left; style/index.css hides
+// its tab, and it is not registered with the layout restorer, so a saved
+// layout never moves it.
+const PLACEHOLDER_ID = 'icos-hub-placeholder';
+
+class Placeholder extends Widget {
+  constructor(private readonly labShell: ILabShell) {
+    super();
+    this.id = PLACEHOLDER_ID;
+  }
+
+  // Its tab cannot be clicked, but shell.activateById() can still make it
+  // the current tab, which would open an empty panel.
+  protected onAfterShow(): void {
+    this.labShell.collapseLeft();
+  }
+}
+
 const sidebar: JupyterFrontEndPlugin<void> = {
   id: '@icos-ext/sidebar',
   autoStart: true,
-  activate: (app: JupyterFrontEnd) => {
+  optional: [ILabShell],
+  activate: (app: JupyterFrontEnd, labShell: ILabShell | null) => {
+    labShell?.add(new Placeholder(labShell), 'left', { rank: Number.MAX_SAFE_INTEGER });
+
     const cleanTabs = () => {
       document
         .querySelectorAll('.jp-SideBar.jp-mod-left ul.lm-TabBar-content li.lm-TabBar-tab')

@@ -122,6 +122,10 @@
   height: auto;
 }
 
+.jp-SideBar li[data-id='icos-hub-placeholder'] {
+  display: none;
+}
+
 @property --icos-popup-angle {
   syntax: '<angle>';
   initial-value: 0deg;
