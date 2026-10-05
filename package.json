@@ -1,6 +1,6 @@
 {
     "name": "icos-ext",
-    "version": "0.2.0",
+    "version": "0.3.0-a0",
     "description": "A JupyterLab extension providing ICOS Carbon Portal branding: custom splash screen and Hub navigation sidebar button.",
     "keywords": [
         "jupyter",
