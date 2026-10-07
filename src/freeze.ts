@@ -53,6 +53,7 @@ interface IFreezeSnapshot {
   provenance_method?: string;
   user_installed?: IFreezeEnvPackage[];
   missing?: string[];
+  requirements_warnings?: string[];
   dockerfile_written: DockerfileOutcome | null;
   bundle_available?: boolean;
 }
@@ -185,6 +186,7 @@ function activateFreeze(app: JupyterFrontEnd, fileBrowser: IDefaultFileBrowser):
     const report = createReport();
     renderConflicts(report, conflicts);
     renderDockerfile(report, snapshot, directory, conflicts);
+    renderRequirementsWarnings(report, snapshot.requirements_warnings ?? []);
     renderPackage(report, snapshot.bundle_available, path);
     renderMissing(report, snapshot.missing ?? []);
     renderEnvironment(report, snapshot);
@@ -504,6 +506,13 @@ function renderDockerfileBlocked(
     report.addWarningLine(snapshot.dockerfile_blocked);
   }
   report.addLine('Fix the files in this directory and freeze again to get a Dockerfile.');
+}
+
+function renderRequirementsWarnings(report: IReport, warnings: string[]): void {
+  if (warnings.length > 0) {
+    report.addHeading(`Differences from your session (${warnings.length})`, true);
+    report.addList(warnings, true);
+  }
 }
 
 function renderPackage(report: IReport, bundleAvailable: boolean | undefined, path: string): void {
