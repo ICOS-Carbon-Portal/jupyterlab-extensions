@@ -185,7 +185,7 @@ function activateFreeze(app: JupyterFrontEnd, fileBrowser: IDefaultFileBrowser):
 
     const report = createReport();
     renderConflicts(report, conflicts);
-    renderDockerfile(report, snapshot, directory, conflicts);
+    renderDockerfile(report, snapshot, freezeFolder(path), conflicts);
     renderRequirementsWarnings(report, snapshot.requirements_warnings ?? []);
     renderPackage(report, snapshot.bundle_available, path);
     renderMissing(report, snapshot.missing ?? []);
@@ -317,6 +317,11 @@ function displayPath(path: string): string {
   return path === '' ? '/' : path;
 }
 
+// The server writes everything it generates into this hidden sub-folder.
+function freezeFolder(path: string): string {
+  return path === '' ? '/.icos-freeze' : `${path}/.icos-freeze`;
+}
+
 function logUnreadable(url: string, error: unknown): void {
   console.error(`Freeze: could not read the response from ${url}`, error);
 }
@@ -439,29 +444,32 @@ function addConflictBlock(report: IReport, conflict: IFreezeConflict): void {
 function renderDockerfile(
   report: IReport,
   snapshot: IFreezeSnapshot,
-  directory: string,
+  folder: string,
   conflicts: IFreezeConflict[]
 ): void {
   report.addHeading('Dockerfile');
 
   switch (snapshot.dockerfile_written) {
     case 'written':
-      report.addLine(`The Dockerfile was written into "${directory}".`);
+      report.addLine(
+        `The Dockerfile was written into "${folder}". ` +
+          'The folder is hidden, so the file browser does not show it.'
+      );
       break;
     case 'unchanged':
       report.addLine(
-        `The Dockerfile in "${directory}" is already up to date, so nothing was rewritten.`
+        `The Dockerfile in "${folder}" is already up to date, so nothing was rewritten.`
       );
       break;
     case 'skipped_foreign':
       report.addWarningLine(
-        `"${directory}" already has a hand-written Dockerfile, which was left alone. ` +
+        `"${folder}" has a Dockerfile that freeze did not generate, which was left alone. ` +
           'The generated Dockerfile was not saved.'
       );
       break;
     case 'error':
       report.addWarningLine(
-        `The Dockerfile could not be written into "${directory}". The server log has the reason.`
+        `The Dockerfile could not be written into "${folder}". The server log has the reason.`
       );
       break;
     default:
@@ -612,7 +620,7 @@ async function downloadBundle(
   // download in Firefox and Safari, so the URL is released in a later one.
   window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
 
-  const savedNote = savedCopy ? ' A copy was also saved into the directory.' : '';
+  const savedNote = savedCopy ? ` A copy was also saved into "${freezeFolder(path)}".` : '';
   setStatus(`Downloaded "${filename}".${savedNote}`);
 }
 

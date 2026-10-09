@@ -25,7 +25,7 @@ takes a few seconds. The ice clears when the report opens.
 The report tells you:
 
 - version conflicts between your notebooks and your dependency files
-- whether the Dockerfile was written, or why it was refused
+- whether the build files were written to `.icos-freeze/`, or why not
 - a Download package button, once nothing is blocking the freeze
 - warnings where the image will differ from your session
 - packages your notebooks import that are not installed here
@@ -173,10 +173,31 @@ files. The `Dockerfile`, the `.dockerignore`, `docker-compose.yml`,
 say how the image is built, or record what was frozen, so they mean
 nothing to anything running inside it.
 
-The same zip is saved into the frozen directory, so you can hand it on
-again later without freezing a second time. The `Dockerfile`, the
-`.dockerignore` and `icos-freeze.json` are also left beside your
-notebooks, so the image can be built straight from that directory.
+## Where freeze writes
+
+Freeze leaves your own files alone. Everything it makes goes into a
+hidden folder, `.icos-freeze/`, inside the directory you froze:
+
+- the `Dockerfile`, `.dockerignore` and `icos-freeze.json`
+- copies of your notebooks and dependency files
+- every zip you download, so you can hand one on again later without
+  freezing a second time
+
+That folder holds the same files as the zip, so the image can be built
+straight from it:
+
+```bash
+docker build .icos-freeze
+```
+
+Each freeze refreshes the folder. A notebook you deleted from your
+directory is removed from it too. Old zips are kept.
+
+The file browser does not list folders whose names start with a dot,
+so your directory looks unchanged. To see the folder, open a terminal
+in that directory and run `ls -a`. JupyterLab also has View > Show
+Hidden Files, but that item only appears when the server allows hidden
+files.
 
 ## Giving it to a tester
 

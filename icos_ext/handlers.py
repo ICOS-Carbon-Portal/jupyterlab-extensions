@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import re
+import shutil
 import sys
 import urllib.parse
 import zipfile
@@ -79,21 +80,28 @@ FROZEN_COMMENT_PREFIX = "# Frozen:"
 # them.
 DOCKERFILE_ON_DISK = frozenset({"written", "unchanged"})
 
+# The hidden folder inside the frozen directory that holds the build
+# context and the saved packages, so a freeze never writes beside the
+# user's own files.
+FREEZE_DIR_NAME = ".icos-freeze"
+
 # The rest of the build context written beside the Dockerfile: the
 # exclusion list docker build reads, and the record of what was frozen.
 DOCKERIGNORE_NAME = ".dockerignore"
 MANIFEST_NAME = "icos-freeze.json"
 
-# Deliberately short. The frozen directory is the build context, so
-# everything not listed here is copied into the image; these are the
-# entries that would either bloat it or carry state that means nothing
-# inside it. What is left is the work itself: the notebooks and the
-# dependency files they need, and nothing else.
+# The build context is FREEZE_DIR_NAME, or the tester's unpacked
+# package, and everything not listed here is copied into the image.
+# Both hold only the copied notebooks and dependency files, the
+# generated files and, in FREEZE_DIR_NAME, the saved packages.
 #
-# "*.zip" is there because the bundle endpoint leaves its handover
-# package in the frozen directory, which is also the build context:
-# without the entry every package would be baked into the next image,
-# and the one after that would carry both.
+# The first two are what JupyterLab and the macOS Finder leave in a
+# tester's unpacked package once it has been opened.
+#
+# "*.zip" is there because the bundle endpoint saves its handover
+# package into FREEZE_DIR_NAME: without the entry every package would
+# be baked into the next image, and the one after that would carry
+# both.
 #
 # The last five are the build scaffolding and the paperwork. The
 # Dockerfile, this exclusion list and the compose file describe how the
@@ -103,11 +111,6 @@ MANIFEST_NAME = "icos-freeze.json"
 # and the record of what was frozen.
 DOCKERIGNORE_ENTRIES = (
     ".ipynb_checkpoints/",
-    ".git/",
-    "__pycache__/",
-    "*.pyc",
-    ".venv/",
-    "node_modules/",
     ".DS_Store",
     "*.zip",
     "Dockerfile",
@@ -118,9 +121,8 @@ DOCKERIGNORE_ENTRIES = (
 )
 
 # The handover package: the files it generates beside the build
-# context. The compose file is a package member only — nothing writes
-# it into the frozen directory, which is the build context the image is
-# built from.
+# context. Both are package members only — nothing writes them into
+# FREEZE_DIR_NAME.
 BUNDLE_README_NAME = "README.md"
 BUNDLE_COMPOSE_NAME = "docker-compose.yml"
 
@@ -1334,15 +1336,16 @@ def _dockerfile_write_reason(outcome):
     """
     if outcome == "skipped_foreign":
         return (
-            "This directory already has a Dockerfile that ICOS Freeze "
-            "did not write, so it was left alone. Move or rename it, "
-            "then freeze again."
+            f"The {FREEZE_DIR_NAME} folder in this directory already "
+            "has a Dockerfile that ICOS Freeze did not write, so it was "
+            "left alone. Move or rename it, then freeze again."
         )
 
     return (
-        "The Dockerfile could not be written to this directory, so "
-        "there is nothing to build or package. Check that you can "
-        "write to the directory, then freeze again."
+        f"The Dockerfile could not be written to the {FREEZE_DIR_NAME} "
+        "folder in this directory, so there is nothing to build or "
+        "package. Check that you can write to the directory, then "
+        "freeze again."
     )
 
 
@@ -1501,13 +1504,13 @@ def _generate_dockerfile(
 
     lines.extend([
         "",
-        "# The frozen directory is the build context, so the notebooks"
-        " and their",
-        "# dependency files are baked into the image instead of having"
-        " to be mounted",
-        "# beside it. 1000:100 is NB_UID:NB_GID in the base image, so"
-        " the copied",
-        "# files belong to jovyan.",
+        "# The build context holds copies of the notebooks and their"
+        " dependency files,",
+        "# so they are baked into the image instead of having to be"
+        " mounted beside it.",
+        "# 1000:100 is NB_UID:NB_GID in the base image, so the copied"
+        " files belong to",
+        "# jovyan.",
         "COPY --chown=1000:100 . /home/jovyan/work",
     ])
 
@@ -1597,12 +1600,12 @@ def _generate_dockerignore():
     """
     lines = [
         DOCKERFILE_HEADER,
-        "# The frozen directory is the build context. These entries are"
-        " checkout",
-        "# state, caches, handover packages and the build scaffolding"
-        " itself. The",
-        "# Dockerfile, this file and the compose file describe how the"
-        " image is",
+        "# This directory is the build context. These entries are what"
+        " JupyterLab and",
+        "# the Finder leave behind, handover packages and the build"
+        " scaffolding itself.",
+        "# The Dockerfile, this file and the compose file describe how"
+        " the image is",
         "# built and run, so none of them belongs inside it.",
         "#",
         f"# The freeze manifest {MANIFEST_NAME} and the README are"
@@ -1687,19 +1690,85 @@ def _write_manifest(directory, document):
     return "written"
 
 
+def _stage_build_context(directory, snapshot):
+    """Copy the snapshot's files into FREEZE_DIR_NAME; return the folder.
+
+    Returns None when the folder cannot be created. Copies of notebooks
+    and dependency files that are no longer in the snapshot are removed,
+    because the Dockerfile copies the whole folder into the image and a
+    stale notebook would ship with it. Nothing else there is touched:
+    saved packages stay, and the generated files are rewritten by their
+    own writers. A file that cannot be copied is left out, and the
+    package README names only what is in the folder.
+    """
+    context = directory / FREEZE_DIR_NAME
+    try:
+        if context.is_symlink():
+            # The writes below would follow it, possibly out of the root.
+            log.warning("Freeze: %s is a symlink, not using it", FREEZE_DIR_NAME)
+            return None
+        context.mkdir(exist_ok=True)
+    except OSError as e:
+        log.warning("Freeze: cannot create %s: %s", FREEZE_DIR_NAME, e)
+        return None
+
+    staged = {
+        item["name"] for item in snapshot["notebooks"] + snapshot["requirements"]
+    }
+
+    try:
+        with os.scandir(context) as entries:
+            stale = [
+                Path(entry.path)
+                for entry in entries
+                if entry.name not in staged
+                and (
+                    _is_notebook_file(entry.name)
+                    or _is_requirement_file(entry.name)
+                )
+                and not entry.is_dir(follow_symlinks=False)
+            ]
+    except OSError as e:
+        log.warning("Freeze: cannot list %s: %s", FREEZE_DIR_NAME, e)
+        stale = []
+    for file_path in stale:
+        try:
+            file_path.unlink()
+        except OSError as e:
+            log.warning(
+                "Freeze: cannot remove the stale %s: %s", file_path.name, e
+            )
+
+    for name in sorted(staged):
+        target = context / name
+        try:
+            # Unlinked first so a symlink in the folder is replaced, not
+            # written through.
+            target.unlink(missing_ok=True)
+            shutil.copyfile(directory / name, target)
+        except OSError as e:
+            log.warning("Freeze: cannot copy %s: %s", name, e)
+
+    return context
+
+
 def _write_build_context(directory, dockerfile, image, snapshot):
-    """Write the whole build context into *directory*; return the outcomes.
+    """Stage the whole build context in FREEZE_DIR_NAME; return the outcomes.
 
     {"dockerfile": ..., "dockerignore": ..., "manifest": ...}, each in
     the vocabulary of _write_generated. The three files are written
-    together because a directory with only some of them is not something
+    together because a folder with only some of them is not something
     docker build can be pointed at, and which endpoint the freeze came
     through should not decide what the user ends up holding.
     """
+    context = _stage_build_context(directory, snapshot)
+    if context is None:
+        return {"dockerfile": "error", "dockerignore": "error", "manifest": "error"}
+
     return {
-        "dockerfile": _write_dockerfile(directory, dockerfile),
-        "dockerignore": _write_dockerignore(directory),
-        "manifest": _write_manifest(directory, _manifest_document(image, snapshot)),
+        "dockerfile": _write_dockerfile(context, dockerfile),
+        "dockerignore": _write_dockerignore(context),
+        "manifest": _write_manifest(context, _manifest_document(image, snapshot)),
     }
 
 
@@ -1756,10 +1825,10 @@ def _bundle_member_bytes(file_path):
 def _bundle_files(directory, items):
     """Return [(name, bytes)] for the freeze *items* that can be read.
 
-    *items* are the snapshot's notebook or dependency-file records. A
-    ".zip" is never taken along: the frozen directory also holds the
-    packages earlier freezes left in it, and a package inside a package
-    is only weight.
+    *items* are the snapshot's notebook or dependency-file records, and
+    *directory* is the staged FREEZE_DIR_NAME. A ".zip" is never taken
+    along: the folder also holds the packages earlier freezes left in
+    it, and a package inside a package is only weight.
     """
     found = []
     for item in items or []:
@@ -1961,33 +2030,33 @@ def _generate_bundle_readme(
 def _bundle_archive(directory, snapshot, image):
     """Return (filename, bytes) for the handover package of *directory*.
 
-    A flat zip: the build context that was just written into the
-    directory, the notebooks and dependency files it describes, a README
-    for whoever has to build it, and a compose file that does the build
-    and the run in one command. Flat because the tester unpacks it and
-    builds in the
-    unpacked directory — a directory prefix would only be one more
-    thing to get wrong.
+    A flat zip: the build context that was just staged in
+    FREEZE_DIR_NAME, with the copies of the notebooks and dependency
+    files it describes, plus a README for whoever has to build it and a
+    compose file that does the build and the run in one command. Flat
+    because the tester unpacks it and builds in the unpacked directory
+    — a directory prefix would only be one more thing to get wrong.
 
-    The build-context files are read back from disk rather than
-    generated a second time, so the package and the directory cannot
-    disagree about what was frozen. *image* is only a fallback for the
-    README: the manifest on disk is the authority.
+    Everything but the README and compose file is read back from the
+    folder rather than generated a second time, so the package and the
+    folder cannot disagree about what was frozen. *image* is only a
+    fallback for the README: the manifest on disk is the authority.
     """
     tag = _generated_tag(directory)
+    staged = directory / FREEZE_DIR_NAME
 
     context = []
     manifest_data = None
     for name in (DOCKERFILE_NAME, DOCKERIGNORE_NAME, MANIFEST_NAME):
-        data = _bundle_member_bytes(directory / name)
+        data = _bundle_member_bytes(staged / name)
         if data is None:
             continue
         if name == MANIFEST_NAME:
             manifest_data = data
         context.append((name, data))
 
-    notebooks = _bundle_files(directory, snapshot["notebooks"])
-    requirements = _bundle_files(directory, snapshot["requirements"])
+    notebooks = _bundle_files(staged, snapshot["notebooks"])
+    requirements = _bundle_files(staged, snapshot["requirements"])
 
     manifest = _bundle_manifest(manifest_data)
     if not manifest.get("image"):
@@ -2016,14 +2085,14 @@ def _bundle_archive(directory, snapshot, image):
 
 
 def _write_bundle(directory, name, data):
-    """Write the handover package into *directory*; return True on success.
+    """Save the package into *directory*'s FREEZE_DIR_NAME; return True if saved.
 
     The download is the primary path, so a directory that cannot be
     written to costs the copy and nothing else: the caller still has the
     bytes and says in a response header whether the copy landed.
     """
     try:
-        (directory / name).write_bytes(data)
+        (directory / FREEZE_DIR_NAME / name).write_bytes(data)
     except OSError as e:
         log.warning("Freeze: cannot write %s: %s", name, e)
         return False
@@ -2138,10 +2207,10 @@ class FreezeHandler(APIHandler):
                 snapshot["provenance_method"],
             )
             # A GET that writes to disk is not ideal, but freezing has to
-            # leave the build context next to the notebooks without a
-            # second click. The writes are idempotent: content that
+            # leave the build context in FREEZE_DIR_NAME without a second
+            # click. The writes are idempotent: generated content that
             # already matches is left untouched, and a hand-written
-            # Dockerfile or .dockerignore is never replaced.
+            # Dockerfile or .dockerignore there is never replaced.
             context = _write_build_context(
                 snapshot["directory"], dockerfile, image, snapshot
             )
@@ -2186,13 +2255,13 @@ class FreezeHandler(APIHandler):
 class BundleHandler(APIHandler):
     """Serves a frozen directory as a zip someone else can build and run.
 
-    The freeze leaves a build context beside the notebooks, which is
+    The freeze leaves a build context in FREEZE_DIR_NAME, which is
     enough for whoever is already sitting in front of that directory. A
     tester is not: they get this package and nothing else, so it carries
     the notebooks, their dependency files, the build context and a
     README with the real commands in it.
 
-    A copy is left in the frozen directory as well, so the same package
+    A copy is saved in FREEZE_DIR_NAME as well, so the same package
     can be handed on again later without freezing a second time.
     """
 
@@ -2241,7 +2310,7 @@ class BundleHandler(APIHandler):
         )
         # The context is written before the archive is built, and the
         # archive then reads it back, so what the tester unpacks is what
-        # the frozen directory holds.
+        # FREEZE_DIR_NAME holds.
         context = _write_build_context(
             directory, dockerfile, image, snapshot
         )
@@ -2266,7 +2335,7 @@ class BundleHandler(APIHandler):
         self.set_header("Content-Disposition", f'attachment; filename="{name}"')
         if saved:
             # Only set when the copy landed, so the frontend can say
-            # "downloaded" rather than "saved beside your notebooks"
+            # "downloaded" rather than "saved in .icos-freeze"
             # without having to guess.
             self.set_header("X-Icos-Freeze-Saved", name)
         self.finish(data)
