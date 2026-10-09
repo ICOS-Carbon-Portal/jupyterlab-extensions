@@ -1,7 +1,5 @@
-import {
-  JupyterFrontEnd,
-  JupyterFrontEndPlugin
-} from '@jupyterlab/application';
+import { ILabShell, JupyterFrontEnd, JupyterFrontEndPlugin } from '@jupyterlab/application';
+import { Widget } from '@lumino/widgets';
 
 const POPUP_ID = 'icos-pinned-popup';
 const TOOLTIP_ID = 'icos-hub-tooltip';
@@ -11,15 +9,36 @@ const TOOLTIP_ID = 'icos-hub-tooltip';
 const INJECT_RETRY_MS = 100;
 const INJECT_MAX_ATTEMPTS = 100;
 
+// The shell hides a side bar whose tab bar has no titles (SideBarHandler's
+// _refreshVisibility in @jupyterlab/application), and the hub tab would go
+// with it. This widget keeps one title on the left; style/index.css hides
+// its tab, and it is not registered with the layout restorer, so a saved
+// layout never moves it.
+const PLACEHOLDER_ID = 'icos-hub-placeholder';
+
+class Placeholder extends Widget {
+  constructor(private readonly labShell: ILabShell) {
+    super();
+    this.id = PLACEHOLDER_ID;
+  }
+
+  // Its tab cannot be clicked, but shell.activateById() can still make it
+  // the current tab, which would open an empty panel.
+  protected onAfterShow(): void {
+    this.labShell.collapseLeft();
+  }
+}
+
 const sidebar: JupyterFrontEndPlugin<void> = {
   id: '@icos-ext/sidebar',
   autoStart: true,
-  activate: (app: JupyterFrontEnd) => {
+  optional: [ILabShell],
+  activate: (app: JupyterFrontEnd, labShell: ILabShell | null) => {
+    labShell?.add(new Placeholder(labShell), 'left', { rank: Number.MAX_SAFE_INTEGER });
+
     const cleanTabs = () => {
       document
-        .querySelectorAll(
-          '.jp-SideBar.jp-mod-left ul.lm-TabBar-content li.lm-TabBar-tab'
-        )
+        .querySelectorAll('.jp-SideBar.jp-mod-left ul.lm-TabBar-content li.lm-TabBar-tab')
         .forEach(tab => {
           const title = tab.getAttribute('title') || '';
           if (title.toLowerCase().includes('commands')) {
@@ -33,10 +52,8 @@ const sidebar: JupyterFrontEndPlugin<void> = {
     let injection: AbortController | null = null;
 
     const tryInject = (): boolean => {
-      const tabBar = document.querySelector(
-        '.jp-SideBar.jp-mod-left ul.lm-TabBar-content'
-      );
-      if (!tabBar) {
+      const tabList = document.querySelector('.jp-SideBar.jp-mod-left ul.lm-TabBar-content');
+      if (!tabList) {
         return false;
       }
 
@@ -44,17 +61,20 @@ const sidebar: JupyterFrontEndPlugin<void> = {
       injection = new AbortController();
       const { signal } = injection;
 
-      tabBar.querySelectorAll('#icos-tab').forEach(el => el.remove());
-      document
-        .querySelectorAll('#' + POPUP_ID + ', #' + TOOLTIP_ID)
-        .forEach(el => el.remove());
+      document.querySelectorAll('#icos-tab').forEach(el => el.remove());
+      document.querySelectorAll('#' + POPUP_ID + ', #' + TOOLTIP_ID).forEach(el => el.remove());
 
-      const tab = document.createElement('li');
+      // Kept outside the ul: Lumino's virtual DOM re-renders that list on
+      // every tab change and throws on any child it did not create.
+      const tab = document.createElement('div');
       tab.className = 'lm-TabBar-tab';
       tab.id = 'icos-tab';
       tab.setAttribute('role', 'tab');
       tab.style.cursor = 'pointer';
       tab.title = 'Open Hub';
+      // JupyterLab's sidebar tab menu offers "Switch Sidebar Side", which
+      // cannot move this element; the attribute makes it skip the menu.
+      tab.dataset.jpSuppressContextMenu = '';
 
       const label = document.createElement('div');
       label.className = 'lm-TabBar-tabLabel';
@@ -68,13 +88,11 @@ const sidebar: JupyterFrontEndPlugin<void> = {
       label.style.fontWeight = 'bold';
       label.style.padding = '0 4px';
       tab.appendChild(label);
-      tabBar.appendChild(tab);
+      tabList.after(tab);
       tab.classList.add('icos-tab-highlight');
-      tab.addEventListener(
-        'animationend',
-        () => tab.classList.remove('icos-tab-highlight'),
-        { once: true }
-      );
+      tab.addEventListener('animationend', () => tab.classList.remove('icos-tab-highlight'), {
+        once: true
+      });
 
       /* ---------------- Pinned Popup ---------------- */
       const isExplore =
@@ -156,9 +174,7 @@ const sidebar: JupyterFrontEndPlugin<void> = {
           let popupTimeout = setTimeout(() => {
             popup.style.display = 'none';
           }, 3000);
-          popup.addEventListener('mouseenter', () =>
-            clearTimeout(popupTimeout)
-          );
+          popup.addEventListener('mouseenter', () => clearTimeout(popupTimeout));
           popup.addEventListener('mouseleave', () => {
             if (popup.style.display !== 'none') {
               popupTimeout = setTimeout(() => {
@@ -192,10 +208,7 @@ const sidebar: JupyterFrontEndPlugin<void> = {
           tooltip.style.display = 'block';
           position();
         });
-        tab.addEventListener(
-          'mouseleave',
-          () => (tooltip.style.display = 'none')
-        );
+        tab.addEventListener('mouseleave', () => (tooltip.style.display = 'none'));
       })();
 
       tab.addEventListener('click', () => {

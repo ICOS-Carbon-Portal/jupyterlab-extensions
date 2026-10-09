@@ -13,6 +13,7 @@ from pathlib import Path
 
 from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
+from packaging.version import InvalidVersion, Version
 from tornado import web
 from tornado.httpclient import AsyncHTTPClient
 
@@ -40,6 +41,27 @@ REQUIREMENT_FILENAMES = frozenset({
     "Pipfile",
     "pyproject.toml",
 })
+
+# The one dependency file that decides what goes on top of the base
+# image. The others are reported and packaged, but install nothing.
+CONTRACT_NAME = "requirements.txt"
+
+# A requirements.txt line the contract accepts: an exact pin, optionally
+# with extras. No markers, options, includes, URLs or wildcards.
+CONTRACT_PIN_RE = re.compile(
+    r"^(?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)"
+    r"\s*(?:\[(?P<extras>[^\]]*)\])?"
+    r"\s*==\s*(?P<version>[A-Za-z0-9][A-Za-z0-9.+!_-]*)$"
+)
+
+# pip reads "#" as a comment only at the start of a line or after
+# whitespace, so "pkg==1.0#frag" is not a comment.
+CONTRACT_COMMENT_RE = re.compile(r"(^|\s)#.*$")
+
+# The name at the start of a Requires-Dist entry, and the extras named
+# in its marker, as in 'rich; extra == "cli"'.
+REQUIRES_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+REQUIRES_EXTRA_RE = re.compile(r"""\bextra\s*==\s*["']([^"']+)["']""")
 
 # The generated Dockerfile: the name it is written under, the header
 # that marks it as ours, and the one line that differs between two
@@ -116,8 +138,9 @@ TAG_SLUG_RE = re.compile(r"[^a-z0-9]+")
 # The file conda writes beside its records; see _scan_environment.
 CONDA_HISTORY_NAME = "history"
 
-# Packages the image's own build layer installs, which no generated
-# Dockerfile may pin. "icos-ext" is this extension: a frozen environment
+# Packages the image's own build layer installs, which the freeze never
+# counts as the user's, so requirements.txt is never asked to pin them.
+# "icos-ext" is this extension: a frozen environment
 # describes the notebooks' dependencies, never the tool that froze it.
 # The rest are the build toolchain the repository Dockerfile installs
 # before building the extension, plus the dependencies hatchling pulls
@@ -576,6 +599,254 @@ def _notebook_installs(notebooks):
     return sorted(installs, key=lambda entry: entry["name"])
 
 
+def _parse_contract(content):
+    """Return the pins, bad lines and duplicates of a requirements.txt.
+
+    {"pins": {normalised name: {"name", "version", "extras"}},
+    "invalid": [line, ...], "duplicates": [name, ...]}. Only exact
+    "name==version" lines, with optional extras, are pins; every other
+    non-blank, non-comment line is invalid, because anything looser
+    would let the rebuilt image resolve to something the notebooks never
+    ran with. A package pinned twice is kept at its first pin.
+    """
+    pins = {}
+    invalid = []
+    duplicates = []
+    for raw_line in content.splitlines():
+        line = CONTRACT_COMMENT_RE.sub("", raw_line).strip()
+        if not line:
+            continue
+
+        match = CONTRACT_PIN_RE.match(line)
+        extras = None
+        if match is not None:
+            extras = [part.strip() for part in (match.group("extras") or "").split(",")]
+            extras = [part for part in extras if part]
+            if not all(CONTRACT_PIN_RE.match(f"{part}==0") for part in extras):
+                extras = None
+        if extras is None:
+            invalid.append(line)
+            continue
+
+        key = _normalise_name(match.group("name"))
+        if key in pins:
+            if match.group("name") not in duplicates:
+                duplicates.append(match.group("name"))
+            continue
+        pins[key] = {
+            "name": match.group("name"),
+            "version": match.group("version"),
+            "extras": frozenset(_normalise_name(part) for part in extras),
+        }
+
+    return {"pins": pins, "invalid": invalid, "duplicates": duplicates}
+
+
+def _parse_requires(requirement):
+    """Return (normalised name, extras) for one Requires-Dist entry.
+
+    *extras* is empty for an unconditional dependency and otherwise
+    holds the extras whose marker pulls it in. Every other marker
+    (python_version, sys_platform, ...) is read as satisfied: counting a
+    dependency that does not apply here only makes the top-level check
+    more lenient, never stricter.
+    """
+    head, _, marker = requirement.partition(";")
+    match = REQUIRES_NAME_RE.match(head)
+    if match is None:
+        return None
+    extras = frozenset(
+        _normalise_name(extra) for extra in REQUIRES_EXTRA_RE.findall(marker)
+    )
+    return _normalise_name(match.group(1)), extras
+
+
+def _installed_requires(distributions=None):
+    """Return {normalised name: [(dependency, extras), ...]} for the environment.
+
+    Read from each installed distribution's Requires-Dist. The first
+    distribution of a name wins, the way the scan in baseline.py counts
+    them. *distributions* defaults to importlib.metadata's.
+    """
+    if distributions is None:
+        distributions = importlib.metadata.distributions()
+
+    found = {}
+    for dist in distributions:
+        try:
+            name = dist.metadata["Name"]
+            requires = dist.requires or []
+        except Exception as e:
+            log.warning("Freeze: skipping an unreadable package: %s", e)
+            continue
+        if not isinstance(name, str) or not name:
+            continue
+        key = _normalise_name(name)
+        if key in found:
+            continue
+        edges = [_parse_requires(item) for item in requires]
+        found[key] = [edge for edge in edges if edge is not None]
+
+    return found
+
+
+def _depended_on(requires, pins):
+    """Return the names some other installed distribution depends on.
+
+    An extra's dependencies count only when requirements.txt asks for
+    that extra, since nothing else says the extra was installed.
+    """
+    needed = set()
+    for key, edges in requires.items():
+        pin = pins.get(key)
+        wanted = pin["extras"] if pin else frozenset()
+        for dependency, extras in edges:
+            if dependency == key:
+                continue
+            if extras and not extras & wanted:
+                continue
+            needed.add(dependency)
+    return needed
+
+
+def _unlisted_top_level(user_installed, requires, pins):
+    """Return the top-level user installs requirements.txt does not pin.
+
+    Top-level means no other installed distribution depends on it, so
+    nothing else would bring it back when the image is rebuilt from
+    requirements.txt. Dependencies are left to pip. Entries are
+    {"name", "version"}, in the order of *user_installed*.
+    """
+    needed = _depended_on(requires, pins)
+    unlisted = []
+    for entry in user_installed:
+        key = _normalise_name(entry["name"])
+        if key in pins or key in needed:
+            continue
+        unlisted.append({
+            "name": entry["name"],
+            "version": entry["installed_version"],
+        })
+    return unlisted
+
+
+def _check_contract(requirements, user_installed, scan, notebooks=()):
+    """Return how the directory's requirements.txt stands against the session.
+
+    {"present", "pins", "invalid", "duplicates", "unlisted", "drifted",
+    "warnings"}. "unlisted" and "drifted" are computed against no pins
+    at all when the file is missing, so the block reason can say what to
+    put in it. "warnings" never block: they say where the rebuilt image
+    will differ from what the notebooks ran with.
+    """
+    content = next(
+        (item["content"] for item in requirements if item["name"] == CONTRACT_NAME),
+        None,
+    )
+    if content is None:
+        parsed = {"pins": {}, "invalid": [], "duplicates": []}
+    else:
+        parsed = _parse_contract(content)
+
+    pins = parsed["pins"]
+    return {
+        "present": content is not None,
+        "pins": pins,
+        "invalid": [
+            {"line": line, "suggestion": _suggest_pin(line, scan["packages"])}
+            for line in parsed["invalid"]
+        ],
+        "duplicates": parsed["duplicates"],
+        "unlisted": _unlisted_top_level(user_installed, scan["requires"], pins),
+        "drifted": _drifted_imports(notebooks, scan, pins),
+        "warnings": _contract_warnings(pins, scan["packages"]),
+    }
+
+
+def _drifted_imports(notebooks, scan, pins):
+    """Return the image packages a notebook imports at another version.
+
+    The top-level check lets a changed image package through when
+    something else depends on it, since pip would bring it back; but it
+    comes back at the image's version, not the one the notebooks ran
+    with. Only imports count, not installs (those block on their own)
+    nor packages pip changed as a side effect. A package
+    requirements.txt pins at any version is settled. Empty without a
+    baseline, because then the image's versions are unknown.
+
+    Entries are {"name", "version", "image_version", "notebooks"},
+    sorted by normalised name, with the notebooks in the order seen.
+    """
+    image_versions = scan.get("image_versions")
+    if not image_versions:
+        return []
+
+    found = {}
+    for notebook in notebooks:
+        for package in notebook["packages"]:
+            if package["source"] != "import":
+                continue
+            entry = _resolve_package(package["name"], scan)
+            key = _normalise_name(entry["name"])
+            if key in pins or _is_excluded(entry["name"]):
+                continue
+            version = entry["installed_version"]
+            image_version = image_versions.get(key)
+            if version is None or image_version is None:
+                continue
+            if version == image_version:
+                continue
+            record = found.setdefault(key, {
+                "name": entry["name"],
+                "version": version,
+                "image_version": image_version,
+                "notebooks": [],
+            })
+            if notebook["name"] not in record["notebooks"]:
+                record["notebooks"].append(notebook["name"])
+
+    return [found[key] for key in sorted(found)]
+
+
+def _suggest_pin(line, packages):
+    """Return "name==installed version" for an invalid *line*, or None.
+
+    Only when the line starts with the name of an installed package, as
+    "seaborn" or "numpy>=1.26" do; an option or a URL gets no suggestion.
+    """
+    match = PIN_RE.match(line)
+    if match is None:
+        return None
+    installed = packages.get(_normalise_name(match.group("name")))
+    if installed is None or not installed["version"]:
+        return None
+    return f"{match.group('name')}=={installed['version']}"
+
+
+def _contract_warnings(pins, packages):
+    """Return one sentence per pin that differs from the running session.
+
+    Sorted by normalised name. Versions are compared as written, so a
+    pin of "1.0" against an installed "1.0.0" is reported too.
+    """
+    warnings = []
+    for key in sorted(pins):
+        pin = pins[key]
+        installed = packages.get(key)
+        if installed is None:
+            warnings.append(
+                f"{pin['name']}: pinned in {CONTRACT_NAME} but not installed"
+                " here, so the notebooks were not run with it."
+            )
+        elif installed["version"] != pin["version"]:
+            warnings.append(
+                f"{pin['name']}: {CONTRACT_NAME} pins {pin['version']}, but"
+                f" your notebooks ran with {installed['version']}. The image"
+                f" will have {pin['version']}."
+            )
+    return warnings
+
+
 def _better_import_name(current, candidate, key):
     """Return True when *candidate* is the better import name for *key*."""
     if current is None:
@@ -714,12 +985,16 @@ def _scan_environment():
     baseline = read_baseline()
     if baseline is None:
         method = "timestamps"
+        image_versions = None
         provenances = _timestamp_provenances(
             packages, scan["conda_meta"], scan["timestamps"]
         )
     else:
         method = "baseline"
         recorded = baseline["packages"]
+        image_versions = {
+            key: package.get("version") for key, package in recorded.items()
+        }
         provenances = {
             key: _baseline_provenance(key, package["version"], recorded)
             for key, package in packages.items()
@@ -739,6 +1014,10 @@ def _scan_environment():
         },
         "import_map": import_map,
         "import_names": import_names,
+        "requires": _installed_requires(),
+        # None without a baseline: the timestamps can say a package was
+        # touched after the build, never which version the image shipped.
+        "image_versions": image_versions,
     }
 
 
@@ -860,14 +1139,150 @@ def _join_names(names):
     return f"{', '.join(names[:-1])} and {names[-1]}"
 
 
-def _dockerfile_block_reason(image, conflicts, installs):
+def _first_three(items):
+    """Return *items* joined for a sentence, with "and N more" past three."""
+    named = list(items[:3])
+    rest = len(items) - len(named)
+    if rest:
+        return f"{', '.join(named)} and {rest} more"
+    return _join_names(named)
+
+
+def _name_notebooks(names):
+    """Return at most two notebook *names*, with "and N more" past that."""
+    if len(names) <= 2:
+        return _join_names(names)
+    return f"{', '.join(names[:2])} and {len(names) - 2} more"
+
+
+def _compare_word(version, image_version):
+    """Return "newer than", "older than" or "differs from" the image's."""
+    try:
+        ours = Version(version)
+        theirs = Version(image_version)
+    except InvalidVersion:
+        return "differs from"
+    if ours > theirs:
+        return "newer than"
+    if ours < theirs:
+        return "older than"
+    return "differs from"
+
+
+def _drift_reason(drifted):
+    """Return the block reason for image packages imported at another version."""
+    pins = [f"{entry['name']}=={entry['version']}" for entry in drifted]
+    notebooks = []
+    for entry in drifted:
+        notebooks.extend(
+            name for name in entry["notebooks"] if name not in notebooks
+        )
+    verb = "imports" if len(notebooks) == 1 else "import"
+
+    if len(drifted) == 1:
+        entry = drifted[0]
+        word = _compare_word(entry["version"], entry["image_version"])
+        return (
+            f"{entry['name']} {entry['version']} is {word} the image's"
+            f" {entry['image_version']}, and {_name_notebooks(notebooks)}"
+            f" {verb} it. Add {pins[0]} to {CONTRACT_NAME} and freeze again."
+        )
+
+    names = [entry["name"] for entry in drifted]
+    return (
+        f"{_first_three(names)} differ from the image's versions, and"
+        f" {_name_notebooks(notebooks)} {verb} them. Add"
+        f" {_first_three(pins)} to {CONTRACT_NAME}, then freeze again."
+    )
+
+
+def _contract_block_reason(contract):
+    """Return why requirements.txt cannot be built from, or None.
+
+    In order: the file is missing, it has lines that are not exact pins,
+    it pins a package twice, a package installed on top of the image is
+    not in it, or a notebook imports an image package at a version other
+    than the image's and the file does not pin it. Each is only worth
+    fixing once the one before it is.
+    """
+    unlisted = contract["unlisted"]
+    drifted = contract.get("drifted", [])
+    pins_to_add = [
+        f"{entry['name']}=={entry['version']}" if entry["version"] else entry["name"]
+        for entry in unlisted
+    ]
+    unlisted_keys = {_normalise_name(entry["name"]) for entry in unlisted}
+    missing_file_pins = pins_to_add + [
+        f"{entry['name']}=={entry['version']}"
+        for entry in drifted
+        if _normalise_name(entry["name"]) not in unlisted_keys
+    ]
+
+    if not contract["present"]:
+        if missing_file_pins:
+            return (
+                f"This directory has no {CONTRACT_NAME}. Add one listing"
+                f" {_first_three(missing_file_pins)}, one per line, then"
+                " freeze again."
+            )
+        return (
+            f"This directory has no {CONTRACT_NAME}. Add one with one"
+            " name==version line per package you installed, then freeze"
+            " again. If you installed nothing, an empty file will do."
+        )
+
+    invalid = contract["invalid"]
+    if invalid:
+        quoted = [f'"{entry["line"]}"' for entry in invalid]
+        lead = "This line does" if len(invalid) == 1 else "These lines do"
+        reason = (
+            f"{CONTRACT_NAME} must pin every package exactly, as"
+            f" name==version. {lead} not: {_first_three(quoted)}."
+        )
+        suggestions = [entry["suggestion"] for entry in invalid[:3]]
+        suggestions = [item for item in suggestions if item]
+        if suggestions:
+            reason += f" Your session has {_join_names(suggestions)}."
+        return f"{reason} Fix the file, then freeze again."
+
+    duplicates = contract["duplicates"]
+    if duplicates:
+        return (
+            f"{CONTRACT_NAME} pins {_first_three(duplicates)} more than once."
+            " Keep one line per package, then freeze again."
+        )
+
+    if unlisted:
+        names = [entry["name"] for entry in unlisted]
+        verb = "is" if len(unlisted) == 1 else "are"
+        lead = f"{_first_three(names)} {verb} installed but not in {CONTRACT_NAME}."
+        if len(pins_to_add) == 1:
+            return f"{lead} Add {pins_to_add[0]} and freeze again."
+        return f"{lead} Add {_first_three(pins_to_add)}, then freeze again."
+
+    if drifted:
+        return _drift_reason(drifted)
+
+    return None
+
+
+def _dockerfile_block_reason(image, conflicts, installs, contract):
     """Return why no Dockerfile can be written, or None when one can.
 
-    Conflicts are reported first: an unknown image is beside the point
-    while the pins still disagree. Installs run from inside a notebook
-    come next — they leave the environment unreproducible from the
-    image and the requirement files, which is what a freeze promises.
-    The unknown image is last.
+    The order, first to last:
+
+    1. Conflicts between a notebook pin and a dependency file pin: an
+       unknown image is beside the point while the pins still disagree.
+    2. Installs run from inside a notebook — they leave the environment
+       unreproducible from the image and requirements.txt, which is what
+       a freeze promises.
+    3. requirements.txt itself, see _contract_block_reason: missing, not
+       exact pins, a package pinned twice, a top-level package installed
+       on top of the image but not pinned, then an image package a
+       notebook imports at another version than the image's, not pinned.
+       A notebook install comes before these because its fix is to move
+       the package into the file.
+    4. The unknown image.
 
     At most three notebooks are named, so the reason stays short enough
     to show in the frontend.
@@ -898,6 +1313,10 @@ def _dockerfile_block_reason(image, conflicts, installs):
             "into requirements.txt, install them, then freeze again."
         )
 
+    reason = _contract_block_reason(contract)
+    if reason is not None:
+        return reason
+
     if not image:
         return (
             "The server did not report a JUPYTER_IMAGE_SPEC, so the base "
@@ -927,36 +1346,11 @@ def _dockerfile_write_reason(outcome):
     )
 
 
-def _run_install_lines(command, specs, tail=None):
-    """Return the RUN lines installing *specs* with *command*.
-
-    A single package stays on one line; several are spread over
-    backslash-continued lines, the way the repository's own Dockerfile
-    formats a long RUN.
-    """
-    if len(specs) == 1:
-        line = f"RUN {command} {specs[0]}"
-        return [f"{line} && {tail}" if tail else line]
-
-    lines = [f"RUN {command} \\"]
-    for index, spec in enumerate(specs):
-        if index < len(specs) - 1:
-            lines.append(f"      {spec} \\")
-        elif tail:
-            lines.append(f"      {spec} && \\")
-            lines.append(f"      {tail}")
-        else:
-            lines.append(f"      {spec}")
-
-    return lines
-
-
 def _pinnable(entry):
     """Return (name, version) for *entry*, or None when it cannot be pinned.
 
     Entries that do not look the way the scan produces them are skipped
-    rather than raising: the Dockerfile is a starting point, not a
-    contract.
+    rather than raising: they only feed a comment.
     """
     if not isinstance(entry, dict):
         return None
@@ -971,70 +1365,46 @@ def _pinnable(entry):
     return name, version
 
 
-def _dockerfile_groups(environment, user_installed):
-    """Return the packages each Dockerfile section installs or mentions.
+def _unknown_provenance(environment):
+    """Return the notebook-referenced packages whose provenance is unknown.
 
-    "conda" and "pip" come from *user_installed*: every package put on
-    top of the base image gets a RUN line, whether or not a notebook
-    names it, because all of it is part of the environment being frozen.
-
-    "unknown" comes from *environment*, the notebook-referenced view.
-    Scoping it that way is deliberate: when the scan cannot date the
-    image at all, every installed package has unknown provenance, and
-    listing the notebooks' handful is useful where listing the whole of
-    site-packages would not be. Unknown provenance never becomes a RUN
-    line either way.
-
-    Packages in EXCLUDED_FROM_DOCKERFILE are dropped from every section,
-    whichever method decided their provenance.
-
-    Every list is sorted by normalised name and de-duplicated, so the
-    same environment always produces the same file.
+    Scoped to the notebook-referenced view on purpose: when the scan
+    cannot date the image at all, every installed package has unknown
+    provenance, and listing the notebooks' handful is useful where
+    listing the whole of site-packages would not be. Packages in
+    EXCLUDED_FROM_DOCKERFILE are dropped. Sorted by normalised name and
+    de-duplicated, so the same environment always produces the same file.
     """
-    groups = {"conda": [], "pip": [], "unknown": []}
-
-    for entry in user_installed or []:
-        pin = _pinnable(entry)
-        if pin is None or entry.get("provenance") != "user":
-            continue
-        if _is_excluded(pin[0]):
-            continue
-        manager = entry.get("manager")
-        if manager in ("conda", "pip"):
-            groups[manager].append(pin)
-
+    found = set()
     for entry in environment or []:
         pin = _pinnable(entry)
         if pin is None or entry.get("provenance") != "unknown":
             continue
         if _is_excluded(pin[0]):
             continue
-        groups["unknown"].append(pin)
+        found.add(pin)
 
-    return {
-        section: sorted(set(found), key=lambda pin: _normalise_name(pin[0]))
-        for section, found in groups.items()
-    }
+    return sorted(found, key=lambda pin: _normalise_name(pin[0]))
 
 
 def _provenance_comments(method):
-    """Return the header lines saying how provenance was decided."""
+    """Return the header lines saying how requirements.txt was checked."""
     if method == "baseline":
         return [
-            "# Provenance: the package baseline recorded when the image"
+            "# Checked against the package baseline recorded when the image"
             " was built,",
-            "# so the list below is exactly what was installed on top of"
-            " it.",
+            f"# so every package installed on top of it is in {CONTRACT_NAME}"
+            " or",
+            "# comes in as a dependency of one that is.",
         ]
 
     return [
-        "# Provenance: file timestamps. No package baseline was found"
-        " in this",
-        "# image. Timestamps cannot tell a late layer of the image's own"
-        " build from",
-        "# a package you installed, so the list below may include some"
-        " the image",
-        "# already ships. Review it before rebuilding.",
+        "# Checked against file timestamps, because no package baseline was"
+        " found in",
+        "# this image. Timestamps cannot tell a late layer of the image's"
+        " own build",
+        "# from a package you installed, so the check may have missed one.",
+        f"# Review {CONTRACT_NAME} before rebuilding.",
     ]
 
 
@@ -1042,7 +1412,7 @@ def _generate_dockerfile(
     path,
     image,
     environment,
-    user_installed,
+    has_pins,
     missing,
     python_version,
     provenance_method,
@@ -1050,26 +1420,20 @@ def _generate_dockerfile(
     """Return the text of a Dockerfile rebuilding the frozen environment.
 
     The base image is pinned by digest, so everything it ships is
-    already reproduced exactly and must not be pinned a second time.
-    Every package installed on top of it is listed, with the manager
-    that owns it: pip-installing a conda-managed package resolves to a
-    different environment, which is the failure this file exists to
-    prevent.
+    already reproduced exactly. What goes on top of it is whatever
+    requirements.txt pins, installed with pip; *has_pins* says whether
+    it pins anything, and when it does not, no install step is written.
+    The pins themselves are not copied in here: the file is in the build
+    context, and one list is one less thing to keep in step.
 
-    *user_installed* drives the RUN lines and *environment* only the
-    comment blocks, so a package the notebooks never name still gets
-    rebuilt.
-
-    *provenance_method* is "baseline" or "timestamps" and is written
-    into the header: a reader has to know whether the list is exact or a
-    best guess before trusting it.
+    *environment* only feeds the comment blocks. *provenance_method* is
+    "baseline" or "timestamps" and is written into the header, because a
+    reader has to know how thoroughly requirements.txt was checked.
 
     Apart from the "# Frozen:" stamp the output depends only on the
     arguments, so freezing the same environment twice gives the same
     file.
     """
-    groups = _dockerfile_groups(environment, user_installed)
-
     lines = [
         DOCKERFILE_HEADER,
         f"# Directory: {path or '/'}",
@@ -1078,38 +1442,21 @@ def _generate_dockerfile(
         "#",
         "# The base image is pinned by digest, so everything it ships is"
         " already",
-        "# reproduced exactly. Only packages installed on top of it are"
-        " listed below.",
+        "# reproduced exactly. What goes on top of it comes from"
+        f" {CONTRACT_NAME},",
+        "# one exact pin per line.",
         "#",
     ]
     lines.extend(_provenance_comments(provenance_method))
     lines.extend(["", f"FROM {image}"])
 
-    conda = groups["conda"]
-    if conda:
-        lines.append("")
-        lines.append("# Installed with conda on top of the base image.")
-        lines.extend(_run_install_lines(
-            "mamba install -y -q",
-            [f"{name}=={version}" for name, version in conda],
-            tail="mamba clean -afy",
-        ))
-
-    pip = groups["pip"]
-    if pip:
-        lines.append("")
-        lines.append("# Installed with pip on top of the base image.")
-        lines.extend(_run_install_lines(
-            "pip install --no-cache-dir",
-            [f"{name}=={version}" for name, version in pip],
-        ))
-
-    if not conda and not pip:
+    if not has_pins:
         lines.extend([
             "",
-            "# Nothing was installed on top of the base image, so the"
-            " digest",
-            "# above reproduces this environment on its own.",
+            f"# {CONTRACT_NAME} pins nothing, so nothing is installed on top"
+            " of the base",
+            "# image and the digest above reproduces this environment on its"
+            " own.",
         ])
 
     names = sorted(
@@ -1125,7 +1472,7 @@ def _generate_dockerfile(
         ])
         lines.extend(f"#   {name}" for name in names)
 
-    unknown = groups["unknown"]
+    unknown = _unknown_provenance(environment)
     if unknown:
         lines.extend([
             "",
@@ -1137,6 +1484,21 @@ def _generate_dockerfile(
 
     lines.append("")
     lines.append("WORKDIR /home/jovyan/work")
+
+    if has_pins:
+        lines.extend([
+            "",
+            f"# {CONTRACT_NAME} is copied and installed before the rest,"
+            " so a change to",
+            "# a notebook does not reinstall every package. 1000:100 is"
+            " NB_UID:NB_GID in",
+            "# the base image, so the copied files belong to jovyan.",
+            f"COPY --chown=1000:100 {CONTRACT_NAME}"
+            f" /home/jovyan/work/{CONTRACT_NAME}",
+            "RUN pip install --no-cache-dir -r"
+            f" /home/jovyan/work/{CONTRACT_NAME}",
+        ])
+
     lines.extend([
         "",
         "# The frozen directory is the build context, so the notebooks"
@@ -1280,6 +1642,10 @@ def _manifest_document(image, snapshot):
     handle that will be minted for a frozen environment so it can be
     cited. It is always null for now, and is in schema 1 so a reader can
     look the field up rather than have it appear under them later.
+
+    "requirements_warnings" records where the rebuilt image will differ
+    from the session the notebooks ran in, which is what a tester needs
+    when a result does not reproduce.
     """
     return {
         "schema": 1,
@@ -1299,6 +1665,7 @@ def _manifest_document(image, snapshot):
             for entry in snapshot["user_installed"]
         ],
         "missing": list(snapshot["missing"]),
+        "requirements_warnings": list(snapshot["contract"]["warnings"]),
     }
 
 
@@ -1535,17 +1902,17 @@ def _generate_bundle_readme(
         " actually has to fetch a package means the image is missing"
         " it.",
         "",
-        f"Then compare the packages `{MANIFEST_NAME}` lists under"
-        " `user_installed` against what the container reports. The"
-        " manifest is in this unpacked package, so read it here and run"
-        " this from the same machine:",
+        f"Then compare `{CONTRACT_NAME}` against what the container"
+        " reports. Every package installed on top of the base image comes"
+        f" from `{CONTRACT_NAME}`, which is in this unpacked package, so"
+        " read it here and run this from the same machine:",
         "",
         "```bash",
         f"docker run --rm {tag} pip list",
         "```",
         "",
-        "Every package under `user_installed` should be in that list, at"
-        " the version the manifest records.",
+        f"Every package in `{CONTRACT_NAME}` should be in that list, at"
+        " the version it pins.",
         "",
         "## What is in this package",
         "",
@@ -1573,6 +1940,20 @@ def _generate_bundle_readme(
             "",
         ])
         lines.extend(f"- {item}" for item in names)
+
+    warnings = manifest.get("requirements_warnings")
+    warnings = [item for item in warnings or [] if isinstance(item, str)]
+    if warnings:
+        lines.extend([
+            "",
+            "## Differences from the frozen session",
+            "",
+            f"The image installs what `{CONTRACT_NAME}` pins, and that is"
+            " not exactly what the notebooks ran with. A result that does"
+            " not reproduce may come from one of these:",
+            "",
+        ])
+        lines.extend(f"- {item}" for item in warnings)
 
     return "\n".join(lines) + "\n"
 
@@ -1655,8 +2036,9 @@ def _freeze_snapshot(handler, path):
 
     The keys are "directory", "requirements", "notebooks", "conflicts",
     "notebook_installs", "environment", "user_installed", "missing",
-    "python_version" and "provenance_method". It is a mapping rather
-    than a tuple because "environment" and "user_installed" are both
+    "contract", "python_version" and "provenance_method". It is a
+    mapping rather than a tuple because "environment" and
+    "user_installed" are both
     lists of package records, and positional unpacking is one edit away
     from silently swapping them.
 
@@ -1683,6 +2065,7 @@ def _freeze_snapshot(handler, path):
 
     scan = _scan_environment()
     environment, missing = _resolve_environment(notebooks, scan)
+    user_installed = _user_installed(scan)
 
     return {
         "directory": directory,
@@ -1691,8 +2074,9 @@ def _freeze_snapshot(handler, path):
         "conflicts": conflicts,
         "notebook_installs": installs,
         "environment": environment,
-        "user_installed": _user_installed(scan),
+        "user_installed": user_installed,
         "missing": missing,
+        "contract": _check_contract(requirements, user_installed, scan, notebooks),
         "python_version": scan["python_version"],
         "provenance_method": scan["provenance_method"],
     }
@@ -1734,7 +2118,10 @@ class FreezeHandler(APIHandler):
 
         image = _session_image()
         blocked = _dockerfile_block_reason(
-            image, snapshot["conflicts"], snapshot["notebook_installs"]
+            image,
+            snapshot["conflicts"],
+            snapshot["notebook_installs"],
+            snapshot["contract"],
         )
         dockerfile = None
         written = None
@@ -1745,7 +2132,7 @@ class FreezeHandler(APIHandler):
                 path,
                 image,
                 snapshot["environment"],
-                snapshot["user_installed"],
+                bool(snapshot["contract"]["pins"]),
                 snapshot["missing"],
                 snapshot["python_version"],
                 snapshot["provenance_method"],
@@ -1780,6 +2167,7 @@ class FreezeHandler(APIHandler):
             "missing": snapshot["missing"],
             "conflicts": snapshot["conflicts"],
             "notebook_installs": snapshot["notebook_installs"],
+            "requirements_warnings": snapshot["contract"]["warnings"],
             "dockerfile": dockerfile,
             "dockerfile_blocked": blocked,
             "dockerfile_written": written,
@@ -1831,7 +2219,10 @@ class BundleHandler(APIHandler):
 
         image = _session_image()
         blocked = _dockerfile_block_reason(
-            image, snapshot["conflicts"], snapshot["notebook_installs"]
+            image,
+            snapshot["conflicts"],
+            snapshot["notebook_installs"],
+            snapshot["contract"],
         )
         if blocked is not None:
             self.set_status(409)
@@ -1843,7 +2234,7 @@ class BundleHandler(APIHandler):
             path,
             image,
             snapshot["environment"],
-            snapshot["user_installed"],
+            bool(snapshot["contract"]["pins"]),
             snapshot["missing"],
             snapshot["python_version"],
             snapshot["provenance_method"],

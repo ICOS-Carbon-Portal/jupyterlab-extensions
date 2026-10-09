@@ -29,6 +29,8 @@ pip install git+https://github.com/ICOS-Carbon-Portal/jupyterlab-extensions.git
 
 ## Local development
 
+### With Docker
+
 This builds a Lab container from the source in this repository and
 mounts `demo/` at `/home/jovyan/freeze_demo`, so there is something to
 freeze:
@@ -39,3 +41,27 @@ docker compose up --build
 
 Lab is then at `http://localhost:8888/lab`. It asks for no token, and
 it is bound to the loopback, so only this machine can reach it.
+
+### Without Docker
+
+You need Node.js 20.19 or newer and JupyterLab 4. The build fails on
+older Node versions, such as 18. JupyterLab brings `jlpm`, its pinned
+copy of Yarn; the build uses it, and so does your editor to find the
+extension's types. The JupyterLab version below matches the one the
+ICOS hub image runs.
+
+```bash
+pip install "jupyterlab==4.5.6"
+jlpm install
+jlpm clean:all
+pip install -e "."
+jupyter labextension develop . --overwrite
+jlpm build
+```
+
+`jlpm clean:all` is there because an earlier build left in
+`icos_ext/labextension/` is reused as-is and Lab would run old code.
+
+To rebuild as you edit, run `jlpm watch` in one terminal and
+`jupyter lab` in another. After each rebuild, hard-reload the browser
+(Ctrl+Shift+R) so it does not use cached files.

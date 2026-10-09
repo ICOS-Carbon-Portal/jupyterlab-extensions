@@ -142,13 +142,13 @@ python -m build      # outputs dist/icos_ext-*.whl and .tar.gz
 
 ## Commit messages
 
-One line, and nothing else. Lowercase `area - summary`, under 72
+One line, and nothing else. Lowercase `area - summary`, at most 50
 characters, no body, no bullet list, no trailers — including no
 AI-attribution line. Recent examples:
 
 ```text
 tsconfig - drop the unused jsx option
-docker - open lab without a token, on localhost only
+readme - bring back the setup without docker
 ```
 
 ## Comments

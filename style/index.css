@@ -115,6 +115,17 @@
   animation: icos-tab-glow 3.2s ease-in-out forwards;
 }
 
+/* JupyterLab's sidepanel.css pins the vertical tab list to one tab's height
+   and lets the tabs overflow it. #icos-tab sits after the list, not in it,
+   so the list has to grow for the tab to land below the last icon. */
+.jp-SideBar.jp-mod-left[data-orientation='vertical'] > .lm-TabBar-content {
+  height: auto;
+}
+
+.jp-SideBar li[data-id='icos-hub-placeholder'] {
+  display: none;
+}
+
 @property --icos-popup-angle {
   syntax: '<angle>';
   initial-value: 0deg;
@@ -383,8 +394,8 @@
 
   /* Blocking input is half the point, and the cursor says so rather
      than inviting another click — but only while the ice is actually
-     up. The node goes into the page a frame before it turns visible
-     and lingers for the fade out after, and an invisible sheet at
+     up. The node stays in the page between freezes and is still
+     fading out after is-visible goes, and an invisible sheet at
      z-index 100000 swallowing clicks meant for the report underneath
      is a lockout, so the pointer is only stopped in the visible
      state. */
@@ -393,15 +404,23 @@
 
   /* Nothing shows until a freeze starts, and the fade out is the slower
      of the two: the screen should feel grabbed at once and let go
-     gently. */
+     gently. visibility flips only once the fade out has finished, so
+     the idle overlay is neither painted nor read out by screen readers
+     with the last freeze's line still in it. */
+  visibility: hidden;
   opacity: 0;
-  transition: opacity 320ms ease-in;
+  transition:
+    opacity 320ms ease-in,
+    visibility 0s linear 320ms;
 }
 
 #icos-freeze-overlay.is-visible {
   pointer-events: auto;
+  visibility: visible;
   opacity: 1;
-  transition: opacity 220ms ease-out;
+  transition:
+    opacity 220ms ease-out,
+    visibility 0s;
 }
 
 /* The ice itself. backdrop-filter does the blur where it is supported,
@@ -433,6 +452,11 @@
   /* The settled size. The animation below only supplies the starting
      point, so turning it off leaves the frost exactly here. */
   background-size: 118% 118%;
+}
+
+/* Tied to is-visible so the growth replays on every freeze: the node is
+   reused, and an animation only restarts when it is applied afresh. */
+#icos-freeze-overlay.is-visible .icos-freeze-overlay-frost {
   animation: icos-freeze-overlay-crystals 900ms ease-out forwards;
 }
 
@@ -633,14 +657,20 @@
   }
 }
 
+/* The idle overlay keeps its node, so its looping animations are held
+   rather than left running behind visibility: hidden. */
+#icos-freeze-overlay:not(.is-visible) .icos-freeze-overlay-blizzard,
+#icos-freeze-overlay:not(.is-visible) .icos-freeze-overlay-blizzard::before,
+#icos-freeze-overlay:not(.is-visible) .icos-freeze-overlay-blizzard::after,
+#icos-freeze-overlay:not(.is-visible) .icos-freeze-overlay-text {
+  animation-play-state: paused;
+}
+
 /* Reduced motion: the crystal growth, the pulse and the fade are all
    motion carrying nothing the ice and the word do not already carry, so
    the overlay just appears at its settled state and disappears again. A
    user who asked for less motion still gets the full message that the
-   app is busy and blocked. Dropping the transition means transitionend
-   never fires here, which is exactly why the teardown in freeze.ts also
-   has a timeout — without it this block would leave the screen iced
-   over for good. */
+   app is busy and blocked. */
 @media (prefers-reduced-motion: reduce) {
   #icos-freeze-overlay {
     transition: none;
@@ -650,7 +680,7 @@
     transition: none;
   }
 
-  .icos-freeze-overlay-frost {
+  #icos-freeze-overlay.is-visible .icos-freeze-overlay-frost {
     animation: none;
   }
 
@@ -666,4 +696,69 @@
   .icos-freeze-overlay-blizzard {
     display: none;
   }
+}
+
+/* Freeze report, shown in the dialog once a freeze finishes. */
+.icos-freeze-report {
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.icos-freeze-report-heading {
+  margin: 12px 0 2px;
+  border-bottom: 1px solid var(--jp-border-color2, #bdbdbd);
+  font-size: inherit;
+  font-weight: bold;
+  line-height: inherit;
+}
+
+.icos-freeze-report-heading:first-child {
+  margin-top: 0;
+}
+
+.icos-freeze-report-list {
+  margin: 0;
+  padding-left: 0.5em;
+  list-style: none;
+}
+
+.icos-freeze-report-notebook {
+  margin-top: 4px;
+  font-weight: 600;
+}
+
+.icos-freeze-report-status,
+.icos-freeze-conflict-instruction {
+  margin-top: 4px;
+}
+
+.icos-freeze-warning {
+  color: var(--jp-warn-color1, #d9822b);
+  font-weight: bold;
+}
+
+.icos-freeze-conflict {
+  margin-bottom: 8px;
+}
+
+.icos-freeze-conflict-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.icos-freeze-conflict-choice[aria-pressed='true'] {
+  border-color: var(--jp-brand-color1);
+  color: var(--jp-brand-color1);
+  font-weight: bold;
+}
+
+.icos-freeze-install {
+  color: var(--jp-warn-color1, #d9822b);
+}
+
+.icos-freeze-install-name {
+  font-weight: 600;
 }

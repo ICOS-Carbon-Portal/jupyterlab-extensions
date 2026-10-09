@@ -2,8 +2,11 @@
 
 Freeze turns a directory of notebooks into a package someone else can
 build and run. They get your notebooks, your dependency files, and a
-recipe that rebuilds the environment those notebooks ran in. They need
-neither an ICOS hub account nor a list of what you installed.
+recipe that rebuilds the environment those notebooks ran in. They do not
+need an ICOS hub account.
+
+You describe what to install with a `requirements.txt` beside your
+notebooks. See [requirements.txt is the contract](#requirementstxt-is-the-contract).
 
 ## Freezing
 
@@ -24,10 +27,80 @@ The report tells you:
 - version conflicts between your notebooks and your dependency files
 - whether the Dockerfile was written, or why it was refused
 - a Download package button, once nothing is blocking the freeze
+- warnings where the image will differ from your session
 - packages your notebooks import that are not installed here
 - the base image and Python version this session runs on
-- what was installed on top of that image, with versions
+- what you installed on top of that image, with versions
 - the dependency files found, and each notebook with its packages
+
+## requirements.txt is the contract
+
+The `requirements.txt` in the folder you freeze says what goes on top
+of the base image. The base image is the image your session runs on.
+
+The Dockerfile starts from the base image and runs
+`pip install -r requirements.txt`. The image gets exactly the versions
+you pinned. What you happen to have installed in your session does not
+matter to the build.
+
+### The rules
+
+Freeze is blocked until all of these hold:
+
+- **The file exists.** No `requirements.txt` means no freeze. An empty
+  file is fine: it means nothing goes on top of the image.
+- **Every line is an exact pin.** Write `name==version`. Extras are
+  fine, as in `pkg[extra]==1.0`. These are refused, and the report
+  names the lines:
+  - a name with no version, such as `seaborn`
+  - ranges, such as `numpy>=1.26`
+  - `-r`, `-e` and other options
+  - URLs
+  - environment markers, such as `; python_version < "3.12"`
+- **Each package appears once.** A package pinned twice is refused.
+- **What you installed yourself is listed.** If you ran `pip install`
+  in your session, that package must be in the file. Packages it pulled
+  in as dependencies do not need a line: pip installs them.
+- **Changed image packages your notebooks use are listed.** If a
+  notebook imports a package the image ships, and your session has a
+  different version, pin it. This happens after something like
+  `pip install -U numpy`.
+
+The report says what to add. For example:
+
+```text
+rich is installed but not in requirements.txt. Add rich==13.7.0 and
+freeze again.
+```
+
+```text
+numpy 2.4.2 is newer than the image's 2.3.1, and analysis.ipynb imports
+it. Add numpy==2.4.2 to requirements.txt and freeze again.
+```
+
+### Warnings
+
+Some differences only warn. The freeze still goes ahead:
+
+- a pinned version differs from the one in your session
+- a pinned package is not installed in your session
+
+For example:
+
+```text
+pandas: requirements.txt pins 2.3.1, but your notebooks ran with 3.0.1.
+The image will have 2.3.1.
+```
+
+Warnings show in the freeze report, in `icos-freeze.json` under
+`requirements_warnings`, and in the package README. If a result does
+not reproduce, look there first.
+
+### Other dependency files
+
+Other files such as `environment.yml` or `requirements-dev.txt` are
+still found, listed and packaged. They do not decide what gets
+installed. Only `requirements.txt` does.
 
 ## Install cells stop a freeze
 
@@ -47,9 +120,9 @@ rebuilding the environment. The image and the requirement files no longer
 describe what the notebook needs, so the person you hand it to would
 build something that cannot run your work.
 
-The fix is to move those packages into a `requirements.txt` beside your
-notebooks, pinned to a version, install them into your environment, and
-freeze again.
+The fix is to move those packages into `requirements.txt` beside your
+notebooks, as exact `name==version` pins, install them into your
+environment, and freeze again.
 
 Before, in a notebook cell:
 
@@ -86,7 +159,7 @@ this on the ICOS hub, report it.
 
 The package is a zip holding:
 
-- `Dockerfile`: rebuilds the environment
+- `Dockerfile`: the base image plus `requirements.txt`
 - `.dockerignore`: what to leave out of the build
 - `docker-compose.yml`: builds and runs it with one command
 - `icos-freeze.json`: what was frozen, and from which image
@@ -124,15 +197,13 @@ each one top to bottom. Nothing should have to be installed along the
 way: an install line such as `%pip install ...` that actually fetches a
 package means the image is missing it, and the freeze needs doing again.
 
-Then they compare the packages listed under `user_installed` in
-`icos-freeze.json` against what the image reports:
+Then they compare `requirements.txt` against what the image reports:
 
 ```bash
 docker run --rm <tag> pip list
 ```
 
 The README writes the real image tag into that command, so it can be
-pasted as it stands. The manifest is read from the unpacked package on
-the tester's own machine, not from inside the container. The image does
-not carry it. Every package under `user_installed` should be in that
-list, at the version the manifest records.
+pasted as it stands. The tester reads `requirements.txt` from the
+unpacked package on their own machine. Every package in it should be in
+that list, at the version it pins.
