@@ -532,11 +532,25 @@ function renderPackage(report: IReport, bundleAvailable: boolean | undefined, pa
         'instructions for a tester.'
     );
 
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'jp-mod-styled';
+    nameInput.placeholder = 'e.g. co2_station_demo';
+
+    const nameLabel = document.createElement('label');
+    nameLabel.className = 'icos-freeze-package-name';
+    nameLabel.append('Package name', nameInput);
+
     const packageButton = document.createElement('button');
     packageButton.type = 'button';
     packageButton.className = 'jp-Dialog-button jp-mod-accept jp-mod-styled';
     packageButton.textContent = 'Download package';
-    report.append(packageButton);
+    packageButton.disabled = true;
+
+    const packageRow = document.createElement('div');
+    packageRow.className = 'icos-freeze-package';
+    packageRow.append(nameLabel, packageButton);
+    report.append(packageRow);
 
     const packageStatus = document.createElement('div');
     packageStatus.className = 'icos-freeze-report-status';
@@ -544,40 +558,50 @@ function renderPackage(report: IReport, bundleAvailable: boolean | undefined, pa
     report.append(packageStatus);
 
     const setPackageStatus = statusWriter(packageStatus);
+    const packageName = (): string => nameInput.value.trim();
 
-    // `finally` brings the button back however the attempt ended.
-    packageButton.addEventListener('click', () => {
+    nameInput.addEventListener('input', () => {
+      packageButton.disabled = packageName() === '';
+    });
+
+    // `finally` brings the controls back however the attempt ended.
+    const startDownload = (): void => {
+      nameInput.disabled = true;
       packageButton.disabled = true;
-      void askAndDownload(path, setPackageStatus).finally(() => {
-        packageButton.disabled = false;
+      void downloadBundle(path, packageName(), setPackageStatus).finally(() => {
+        nameInput.disabled = false;
+        packageButton.disabled = packageName() === '';
       });
+    };
+
+    packageButton.addEventListener('click', startDownload);
+
+    // The Dialog catches Enter in the capture phase on its own node and
+    // closes itself, so the field has to claim the key on the document,
+    // above the Dialog, while it holds focus.
+    const onEnter = (event: KeyboardEvent): void => {
+      if (!nameInput.isConnected) {
+        document.removeEventListener('keydown', onEnter, true);
+        return;
+      }
+      if (event.key !== 'Enter' || event.target !== nameInput) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (!packageButton.disabled) {
+        startDownload();
+      }
+    };
+    nameInput.addEventListener('focus', () => {
+      document.addEventListener('keydown', onEnter, true);
+    });
+    nameInput.addEventListener('blur', () => {
+      document.removeEventListener('keydown', onEnter, true);
     });
   } else {
     report.addLine('No package can be made until the Dockerfile problem above is fixed.');
   }
-}
-
-// The caller owns the button and re-enables it when this settles.
-async function askAndDownload(
-  path: string,
-  setStatus: (text: string, warn?: boolean) => void
-): Promise<void> {
-  const result = await InputDialog.getText({
-    title: 'Package name',
-    label: 'Name for the package and its image:',
-    placeholder: 'e.g. co2_station_demo'
-  });
-  if (!result.button.accept || result.value === null) {
-    return;
-  }
-
-  const name = result.value.trim();
-  if (name === '') {
-    setStatus('A package name is needed to download the package.', true);
-    return;
-  }
-
-  await downloadBundle(path, name, setStatus);
 }
 
 async function downloadBundle(

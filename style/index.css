@@ -733,6 +733,18 @@
   margin-top: 4px;
 }
 
+.icos-freeze-package,
+.icos-freeze-package-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.icos-freeze-package {
+  margin-top: 4px;
+}
+
 .icos-freeze-warning {
   color: var(--jp-warn-color1, #d9822b);
   font-weight: bold;

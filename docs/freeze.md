@@ -26,9 +26,9 @@ The report tells you:
 
 - version conflicts between your notebooks and your dependency files
 - whether the build files were written to `.icos-freeze/`, or why not
-- a Download package button, once nothing is blocking the freeze. It
-  asks you to make up a name for the package (see
-  [The package name](#the-package-name))
+- a Download package button, once nothing is blocking the freeze, with
+  a Package name field next to it where you make up a name for the
+  package (see [The package name](#the-package-name))
 - warnings where the image will differ from your session
 - packages your notebooks import that are not installed here
 - the base image and Python version this session runs on
@@ -204,8 +204,10 @@ files.
 
 ## The package name
 
-Download package asks for a name. The box starts empty, and you make the
-name up. It becomes both the zip name, `<name>.zip`, and the Docker image
+Type a name in the Package name field next to Download package. The
+field starts empty, and you make the name up. The button stays disabled
+until there is a name, and pressing Enter in the field also downloads.
+The name becomes both the zip name, `<name>.zip`, and the Docker image
 tag, `icos-frozen:<name>`, used in the package's compose file and README.
 
 Because it is an image tag, the name is cleaned up: capitals become
