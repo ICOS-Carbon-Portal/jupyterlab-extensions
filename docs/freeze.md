@@ -26,7 +26,9 @@ The report tells you:
 
 - version conflicts between your notebooks and your dependency files
 - whether the build files were written to `.icos-freeze/`, or why not
-- a Download package button, once nothing is blocking the freeze
+- a Download package button, once nothing is blocking the freeze. It
+  asks you to make up a name for the package (see
+  [The package name](#the-package-name))
 - warnings where the image will differ from your session
 - packages your notebooks import that are not installed here
 - the base image and Python version this session runs on
@@ -181,7 +183,8 @@ hidden folder, `.icos-freeze/`, inside the directory you froze:
 - the `Dockerfile`, `.dockerignore` and `icos-freeze.json`
 - copies of your notebooks and dependency files
 - every zip you download, so you can hand one on again later without
-  freezing a second time
+  freezing a second time. Downloading again under the same name replaces
+  that zip
 
 That folder holds the same files as the zip, so the image can be built
 straight from it:
@@ -191,13 +194,26 @@ docker build .icos-freeze
 ```
 
 Each freeze refreshes the folder. A notebook you deleted from your
-directory is removed from it too. Old zips are kept.
+directory is removed from it too. Zips under other names are kept.
 
 The file browser does not list folders whose names start with a dot,
 so your directory looks unchanged. To see the folder, open a terminal
 in that directory and run `ls -a`. JupyterLab also has View > Show
 Hidden Files, but that item only appears when the server allows hidden
 files.
+
+## The package name
+
+Download package asks for a name. The box starts empty, and you make the
+name up. It becomes both the zip name, `<name>.zip`, and the Docker image
+tag, `icos-frozen:<name>`, used in the package's compose file and README.
+
+Because it is an image tag, the name is cleaned up: capitals become
+lowercase, anything other than letters, digits and underscores becomes
+`_`, and it is cut to 64 characters. `My Run 2` becomes `my_run_2`.
+
+Neither the zip nor the tag carries a date or time. To keep two builds
+apart, give them different names.
 
 ## Giving it to a tester
 
@@ -224,7 +240,7 @@ Then they compare `requirements.txt` against what the image reports:
 docker run --rm <tag> pip list
 ```
 
-The README writes the real image tag into that command, so it can be
-pasted as it stands. The tester reads `requirements.txt` from the
+The README writes the real image tag, `icos-frozen:<name>`, into that
+command, so it can be pasted as it stands. The tester reads `requirements.txt` from the
 unpacked package on their own machine. Every package in it should be in
 that list, at the version it pins.

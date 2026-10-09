@@ -1,4 +1,3 @@
-import datetime
 import importlib.metadata
 import io
 import json
@@ -132,10 +131,13 @@ BUNDLE_COMPOSE_NAME = "docker-compose.yml"
 # cannot bind. The container side stays 8888.
 BUNDLE_COMPOSE_PORT = 8899
 
-# Everything a generated slug may not contain. Runs of it collapse to a
-# single underscore, so a directory name arrives as snake case and the
-# package name and the tag built from it are snake case throughout.
+# Everything a package name may not contain. Runs of it collapse to a
+# single underscore, so whatever the user types arrives as snake case,
+# legal both as a Docker tag and as a filename on every platform.
 TAG_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+# Docker allows 128 characters in a tag; this keeps the zip name readable.
+PACKAGE_NAME_MAX_LENGTH = 64
 
 # The file conda writes beside its records; see _scan_environment.
 CONDA_HISTORY_NAME = "history"
@@ -1772,39 +1774,16 @@ def _write_build_context(directory, dockerfile, image, snapshot):
     }
 
 
-def _directory_slug(directory):
-    """Return *directory*'s name as a snake case slug.
+def _package_name(raw):
+    """Return *raw* cleaned into a package name, or "" if nothing is left.
 
-    Anything outside a-z and 0-9 collapses to a single underscore, so
-    "My Analysis" and "my-analysis" both arrive as "my_analysis". A name
-    that survives as nothing — the server root among them — becomes
-    "root". The generated tag and the generated package name are both
-    built on it, so one directory is named the same way by both.
+    Lowercased, with every run outside a-z and 0-9 collapsed to one
+    underscore, so "My CO2 Demo!" arrives as "my_co2_demo". The zip is
+    "<name>.zip" and the image tag "icos-frozen:<name>", so saving under
+    a name already used replaces that package.
     """
-    return TAG_SLUG_RE.sub("_", directory.name.lower()).strip("_") or "root"
-
-
-def _utc_stamp():
-    """Return the current UTC time as a compact, sortable stamp.
-
-    ISO 8601 basic format: the T separates the date from the time and
-    the Z says the time is UTC, so a stamp read on its own cannot be
-    mistaken for local time. Both are legal in a Docker tag and in a
-    filename on every platform we ship to.
-    """
-    now = datetime.datetime.now(datetime.timezone.utc)
-    return now.strftime("%Y%m%dT%H%M%SZ")
-
-
-def _generated_tag(directory):
-    """Return the default image tag for a build of *directory*.
-
-    "icos-frozen:<slug>_<stamp>", the slug from the directory name and
-    the stamp UTC to the second. The stamp is what keeps successive
-    builds of one directory apart, instead of each quietly taking the
-    tag off the last.
-    """
-    return f"icos-frozen:{_directory_slug(directory)}_{_utc_stamp()}"
+    name = TAG_SLUG_RE.sub("_", raw.lower()).strip("_")
+    return name[:PACKAGE_NAME_MAX_LENGTH].rstrip("_")
 
 
 def _bundle_member_bytes(file_path):
@@ -2027,7 +2006,7 @@ def _generate_bundle_readme(
     return "\n".join(lines) + "\n"
 
 
-def _bundle_archive(directory, snapshot, image):
+def _bundle_archive(directory, snapshot, image, package):
     """Return (filename, bytes) for the handover package of *directory*.
 
     A flat zip: the build context that was just staged in
@@ -2041,8 +2020,9 @@ def _bundle_archive(directory, snapshot, image):
     folder rather than generated a second time, so the package and the
     folder cannot disagree about what was frozen. *image* is only a
     fallback for the README: the manifest on disk is the authority.
+    *package* is a name already cleaned by _package_name.
     """
-    tag = _generated_tag(directory)
+    tag = f"icos-frozen:{package}"
     staged = directory / FREEZE_DIR_NAME
 
     context = []
@@ -2080,7 +2060,7 @@ def _bundle_archive(directory, snapshot, image):
         archive.writestr(BUNDLE_README_NAME, readme)
         archive.writestr(BUNDLE_COMPOSE_NAME, compose)
 
-    filename = f"{_directory_slug(directory)}_frozen_{_utc_stamp()}.zip"
+    filename = f"{package}.zip"
     return filename, buffer.getvalue()
 
 
@@ -2280,6 +2260,16 @@ class BundleHandler(APIHandler):
     @web.authenticated
     def get(self):
         path = self.get_query_argument("path", default="")
+        name = _package_name(self.get_query_argument("name", default=""))
+        if not name:
+            self.set_status(400)
+            self.set_header("Content-Type", "application/json")
+            self.finish(json.dumps({
+                "status": "invalid_name",
+                "reason": "Give the package a name that contains at least"
+                " one letter or digit.",
+            }))
+            return
 
         # The snapshot is collected from the directory itself, so the
         # package is refused for the same reasons a freeze would be.
@@ -2328,16 +2318,18 @@ class BundleHandler(APIHandler):
             }))
             return
 
-        name, data = _bundle_archive(directory, snapshot, image)
-        saved = _write_bundle(directory, name, data)
+        filename, data = _bundle_archive(directory, snapshot, image, name)
+        saved = _write_bundle(directory, filename, data)
 
         self.set_header("Content-Type", "application/zip")
-        self.set_header("Content-Disposition", f'attachment; filename="{name}"')
+        self.set_header(
+            "Content-Disposition", f'attachment; filename="{filename}"'
+        )
         if saved:
             # Only set when the copy landed, so the frontend can say
             # "downloaded" rather than "saved in .icos-freeze"
             # without having to guess.
-            self.set_header("X-Icos-Freeze-Saved", name)
+            self.set_header("X-Icos-Freeze-Saved", filename)
         self.finish(data)
 
 

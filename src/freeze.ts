@@ -548,7 +548,7 @@ function renderPackage(report: IReport, bundleAvailable: boolean | undefined, pa
     // `finally` brings the button back however the attempt ended.
     packageButton.addEventListener('click', () => {
       packageButton.disabled = true;
-      void downloadBundle(path, setPackageStatus).finally(() => {
+      void askAndDownload(path, setPackageStatus).finally(() => {
         packageButton.disabled = false;
       });
     });
@@ -558,14 +558,37 @@ function renderPackage(report: IReport, bundleAvailable: boolean | undefined, pa
 }
 
 // The caller owns the button and re-enables it when this settles.
+async function askAndDownload(
+  path: string,
+  setStatus: (text: string, warn?: boolean) => void
+): Promise<void> {
+  const result = await InputDialog.getText({
+    title: 'Package name',
+    label: 'Name for the package and its image:',
+    placeholder: 'e.g. co2_station_demo'
+  });
+  if (!result.button.accept || result.value === null) {
+    return;
+  }
+
+  const name = result.value.trim();
+  if (name === '') {
+    setStatus('A package name is needed to download the package.', true);
+    return;
+  }
+
+  await downloadBundle(path, name, setStatus);
+}
+
 async function downloadBundle(
   path: string,
+  name: string,
   setStatus: (text: string, warn?: boolean) => void
 ): Promise<void> {
   setStatus('Preparing the package.');
 
-  const query = encodeURIComponent(path);
-  const bundleUrl = `${PageConfig.getBaseUrl()}icos-ext/bundle?path=${query}`;
+  const query = `path=${encodeURIComponent(path)}&name=${encodeURIComponent(name)}`;
+  const bundleUrl = `${PageConfig.getBaseUrl()}icos-ext/bundle?${query}`;
 
   const response = await freezeRequest(bundleUrl, { method: 'GET' });
   if (!response) {
@@ -573,7 +596,8 @@ async function downloadBundle(
     return;
   }
 
-  if (response.status === 409) {
+  // 409: the directory cannot be packaged. 400: the name cleaned to nothing.
+  if (response.status === 409 || response.status === 400) {
     let blocked: IFreezeBundleBlocked;
     try {
       blocked = (await response.json()) as IFreezeBundleBlocked;
