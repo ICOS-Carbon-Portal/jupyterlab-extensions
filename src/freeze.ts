@@ -7,6 +7,11 @@ import { PageConfig } from '@jupyterlab/coreutils';
 import { ServerConnection } from '@jupyterlab/services';
 import { IStateDB } from '@jupyterlab/statedb';
 
+// Not an import: package.json sits outside rootDir (TS6059). tsc emits the
+// require as-is and webpack resolves it from lib/, where the path still holds.
+declare function require(path: '../package.json'): { version: string };
+const { version } = require('../package.json');
+
 interface IFreezeRequirement {
   name: string;
 }
@@ -195,7 +200,7 @@ function activateFreeze(
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'icos-freeze-button';
-  button.title = 'Freeze the current file browser directory';
+  button.title = `Freeze the current file browser directory\nicos-ext ${version}`;
 
   const label = document.createElement('span');
   label.className = 'icos-freeze-label';
