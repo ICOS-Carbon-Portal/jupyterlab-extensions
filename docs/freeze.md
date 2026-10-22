@@ -22,44 +22,59 @@ While a freeze runs, the screen ices over and stops taking clicks. This
 is normal: the server is reading every package in your environment, which
 takes a few seconds. The ice clears when the report opens.
 
-Opening the report writes nothing to disk. The report tells you:
+Opening the report writes nothing to disk. The report has three numbered
+steps:
 
-- which files go into the package (see [Choosing files](#choosing-files))
-- version conflicts between your notebooks and your dependency files
-- whether a Dockerfile can be made, or why not
-- a Package section with three numbered steps: check the selected
-  files and any problems in the report, name the package, and press
-  Download package (see [The package name](#the-package-name))
-- warnings where the image will differ from your session
-- packages your notebooks import that are not installed here
-- notebooks that could not be read, listed as not checked
-- the base image and Python version this session runs on
-- what you installed on top of that image, with versions
-- the dependency files found, and each notebook with its packages
+1. **Review the selection.** A tree of the files that go into the
+   package (see [Choosing files](#choosing-files)). Below it, Left out
+   lists your own top-level files that the package replaces.
+2. **Resolve the reported issues.** Problems in red prevent the package
+   from being created. Warnings do not.
+   - Red problems come first: why a Dockerfile cannot be made, version
+     conflicts between your notebooks and your dependency files, and
+     install cells that need changing. When there are none, the step
+     says "Nothing prevents the package from being created."
+   - Warnings follow: packages your notebooks import that are not
+     installed here, notebooks that could not be read (listed as not
+     checked), and where the image will differ from your session.
+   - A collapsed Details section holds the rest: the Dockerfile, the
+     base image and Python version, what you installed on top of the
+     image, the dependency files found, each notebook with its
+     packages, and your local code.
+3. **Create the package.** Name the package and download it (see
+   [The package name](#the-package-name)).
 
 ## Choosing files
 
-The Files section shows everything in the folder, subfolders included,
-as a tree with a checkbox per file. Ticked files go into the package at
-the same place they sit in your folder. Some files start ticked:
+Step 1 shows everything in the folder, subfolders included, as a tree
+with a checkbox per file. Ticked files go into the package at
+the same place they sit in your folder. Each file and folder shows its
+size.
 
-- every notebook
-- the dependency files at the top of the folder, such as
-  `requirements.txt`
-- your own code that a notebook imports, such as a `scripts/` folder or
-  a `helper.py` next to the notebook
+Every listed file starts ticked, except hidden ones: a file whose name,
+or the name of a folder it sits in, starts with a dot, such as `.env`.
+Those start unticked because they often hold keys or passwords. Untick
+what the package does not need, such as large data files.
 
-Everything else, such as data files, is listed unticked with its size.
-Tick what the package needs. Reset to recommended puts the starting
-ticks back.
+Notebooks, dependency files at the top of the folder (such as
+`requirements.txt`) and your own code that a notebook imports (such as
+a `helper.py` next to it) carry a label in the tree, so you can see
+what the notebooks rely on before you untick anything.
+
+Your choices are remembered for each folder, so they are still there
+when you close and reopen the report or reload the page. A file added to
+the folder later starts ticked like any other. Reset to recommended puts
+the starting ticks back and forgets the saved choices.
 
 Some things are never listed and never packaged: `.ipynb_checkpoints`,
 `__pycache__`, `.git`, `.virtual_documents`, `.icos-freeze`,
 `.DS_Store`, zips and `.pyc` files. At the top of the folder,
 `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `icos-freeze.json`
-and `README.md` are not listed either, because the package writes its
-own files under those names. The list stops at 5000 files, and the
-report warns when it does.
+and `HOW_TO_RUN.md` are not listed either, because the package writes
+its own files under those names. If your folder has one of them, the
+report shows it under Left out with the reason, so you can see it was
+not packaged. The list stops at 5000 files, and the report warns when
+it does.
 
 Changing a tick checks the report again. Only ticked notebooks count for
 missing packages, install cells and version conflicts. If you untick
@@ -134,8 +149,8 @@ The image will have 2.3.1.
 ```
 
 Warnings show in the freeze report, in `icos-freeze.json` under
-`requirements_warnings`, and in the package README. If a result does
-not reproduce, look there first.
+`requirements_warnings`, and in the package's `HOW_TO_RUN.md`. If a
+result does not reproduce, look there first.
 
 ### Other dependency files
 
@@ -206,12 +221,12 @@ The package is a zip holding:
 - `.dockerignore`: what to leave out of the build
 - `docker-compose.yml`: builds and runs it with one command
 - `icos-freeze.json`: what was frozen, and from which image
-- `README.md`: the commands the tester runs
+- `HOW_TO_RUN.md`: the commands the tester runs
 - the files you ticked, at the same paths as in your folder
 
 The image that gets built holds only the files you ticked. The
 `Dockerfile`, the `.dockerignore`, `docker-compose.yml`,
-`icos-freeze.json`, the README and any zip are all kept out of it: they
+`icos-freeze.json`, `HOW_TO_RUN.md` and any zip are all kept out of it: they
 say how the image is built, or record what was frozen, so they mean
 nothing to anything running inside it.
 
@@ -246,16 +261,14 @@ files.
 
 ## The package name
 
-The Package section of the report walks you through three steps:
-
-1. Check the selected files and any problems in this report.
-2. Name the package: type a name in the field. It starts empty, and you
-   make the name up.
-3. Press Download package. Pressing Enter in the name field does the
-   same.
+Step 3 is the last part of the report. The Package name field and the
+Download package button share one row. The field starts empty, and you
+make the name up. Type it, then select Download package. Pressing Enter
+in the name field does the same.
 
 The name becomes both the zip name, `<name>.zip`, and the Docker image
-tag, `icos-frozen:<name>`, used in the package's compose file and README.
+tag, `icos-frozen:<name>`, used in the package's compose file and
+`HOW_TO_RUN.md`.
 
 Because it is an image tag, the name is cleaned up: capitals become
 lowercase, anything other than letters, digits and underscores becomes
@@ -265,15 +278,18 @@ Neither the zip nor the tag carries a date or time. To keep two builds
 apart, give them different names.
 
 The Download package button stays disabled until the package can be
-made, and a line under it says why: the reason a freeze is blocked, the
-report still updating after a change, or "Type a name to enable the
-download".
+made, and a line under it says why. When a red problem blocks the
+freeze, the line points you to step 2, where the problem itself is
+listed. Otherwise it says the report is still updating after a change,
+or "Type a name to enable the download".
 
 After a download, a Next steps note confirms the zip was downloaded and,
 when the copy was saved, that one is also in the folder's
 `.icos-freeze/`. It then tells you to give the zip to the tester, and
-that the `README.md` inside explains how to build and run it. The Close
-button at the bottom only closes the report window.
+that the `HOW_TO_RUN.md` inside explains how to build and run it.
+
+The Close button sits below step 3. It only closes the report
+window and does not download anything.
 
 ## Giving it to a tester
 
@@ -288,7 +304,7 @@ JupyterLab is then at `http://localhost:8899/lab`. It asks for no
 token, and it listens on this machine only. The notebooks are at
 `/home/jovyan/work` inside the container.
 
-The check itself is done by hand, and the README in the package spells
+The check itself is done by hand, and `HOW_TO_RUN.md` in the package spells
 it out. The tester opens the notebooks in the running container and runs
 each one top to bottom. Nothing should have to be installed along the
 way: an install line such as `%pip install ...` that actually fetches a
@@ -300,7 +316,7 @@ Then they compare `requirements.txt` against what the image reports:
 docker run --rm <tag> pip list
 ```
 
-The README writes the real image tag, `icos-frozen:<name>`, into that
+`HOW_TO_RUN.md` writes the real image tag, `icos-frozen:<name>`, into that
 command, so it can be pasted as it stands. The tester reads `requirements.txt` from the
 unpacked package on their own machine. Every package in it should be in
 that list, at the version it pins.

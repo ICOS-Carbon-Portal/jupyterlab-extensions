@@ -171,7 +171,7 @@ that restates the code is deleted, however well written.
 ## Documentation
 
 No em dashes in anything a reader opens: `README.md`, `docs/freeze.md`,
-and the README, compose file, `.dockerignore` and Dockerfile comments
+and the `HOW_TO_RUN.md`, compose file, `.dockerignore` and Dockerfile comments
 that a freeze package generates. Use a colon, a comma or a second
 sentence instead, never `--`. Code comments and docstrings keep the em
 dash.

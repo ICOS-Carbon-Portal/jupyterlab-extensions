@@ -55,6 +55,11 @@ interface IFreezeUnreadable {
   reason: string;
 }
 
+interface IFreezeLeftOut {
+  path: string;
+  reason: string;
+}
+
 interface IFreezeSnapshot {
   image: string | null;
   requirements?: IFreezeRequirement[];
@@ -74,6 +79,7 @@ interface IFreezeSnapshot {
   local_modules?: string[];
   unreadable_notebooks?: IFreezeUnreadable[];
   files_truncated?: boolean;
+  left_out?: IFreezeLeftOut[];
 }
 
 interface IFreezeFolder {
@@ -97,7 +103,7 @@ interface IFileSelection {
 
 interface IPackageSection {
   node: HTMLDivElement;
-  setAvailable: (available: boolean, blockedReason?: string | null) => void;
+  setAvailable: (available: boolean) => void;
   setPending: (pending: boolean) => void;
 }
 
@@ -115,12 +121,14 @@ interface IFreezeOverlay {
   text: HTMLDivElement;
 }
 
+type Tone = 'warning' | 'error' | 'success';
+
 interface IReport {
   node: HTMLDivElement;
-  addLine: (text: string) => void;
-  addWarningLine: (text: string) => void;
-  addHeading: (text: string, warning?: boolean) => void;
-  addList: (items: string[], warning?: boolean) => void;
+  addLine: (text: string, tone?: Tone) => void;
+  addIssue: (text: string, tone: Tone) => void;
+  addHeading: (text: string, tone?: Tone) => void;
+  addList: (items: string[], tone?: Tone) => void;
   append: (child: HTMLElement) => void;
 }
 
@@ -129,6 +137,12 @@ interface IReport {
 const BASELINE_PROVENANCE = 'baseline';
 
 const WARNING_CLASS = 'icos-freeze-warning';
+
+const TONE_CLASSES: Record<Tone, string> = {
+  warning: WARNING_CLASS,
+  error: 'icos-freeze-error',
+  success: 'icos-freeze-success'
+};
 
 const RECHECK_DELAY_MS = 400;
 
@@ -234,7 +248,7 @@ function activateFreeze(
     // a keyboard user cannot reach the scroll container.
     container.tabIndex = 0;
 
-    // Everything below the file tree is re-rendered on each change of
+    // Only what follows the file tree is re-rendered on each change of
     // selection; above it, a change in height would shift the tree under
     // the pointer.
     const selection = createFileSelection(
@@ -242,19 +256,36 @@ function activateFreeze(
       initialSelection(first, saved.excluded),
       onSelectionChange
     );
-    const top = createReport();
-    const bottom = createReport();
+    const leftOut = createReport();
+    const issues = createReport();
     const packageSection = createPackageSection(path, selection.include);
-    container.append(selection.node, top.node, packageSection.node, bottom.node);
+    container.append(
+      createStep(
+        '1. Review the selection',
+        'Clear any file that should not be included in the package.',
+        selection.node,
+        leftOut.node
+      ),
+      createStep(
+        '2. Resolve the reported issues',
+        'Problems in red prevent the package from being created. Warnings do not.',
+        issues.node
+      ),
+      createStep(
+        '3. Create the package',
+        'Enter a package name and select Download package.',
+        packageSection.node
+      )
+    );
 
-    const preview = { open: false };
+    const details = { open: false };
     const render = (snapshot: IFreezeSnapshot): void => {
       const scroll = container.scrollTop;
-      top.node.replaceChildren();
-      bottom.node.replaceChildren();
-      renderTop(top, snapshot, path, preview);
-      renderBottom(bottom, snapshot);
-      packageSection.setAvailable(snapshot.bundle_available === true, snapshot.dockerfile_blocked);
+      leftOut.node.replaceChildren();
+      issues.node.replaceChildren();
+      renderLeftOut(leftOut, snapshot.left_out ?? []);
+      renderIssues(issues, snapshot, freezeFolder(path), details);
+      packageSection.setAvailable(snapshot.bundle_available === true);
       container.scrollTop = scroll;
     };
     render(first);
@@ -550,31 +581,38 @@ function createReport(): IReport {
   const container = document.createElement('div');
   container.className = 'icos-freeze-report-section';
 
-  function addLine(text: string): void {
+  function addLine(text: string, tone?: Tone): void {
     const line = document.createElement('div');
+    if (tone) {
+      line.className = TONE_CLASSES[tone];
+    }
     line.textContent = text;
     container.appendChild(line);
   }
 
-  function addWarningLine(text: string): void {
+  function addIssue(text: string, tone: Tone): void {
     const line = document.createElement('div');
-    line.className = WARNING_CLASS;
+    line.className = `icos-freeze-issue ${TONE_CLASSES[tone]}`;
     line.textContent = text;
     container.appendChild(line);
   }
 
-  function addHeading(text: string, warning = false): void {
-    const heading = document.createElement('h3');
+  function addHeading(text: string, tone?: Tone): void {
+    const heading = document.createElement('h4');
     heading.className = 'icos-freeze-report-heading';
-    heading.classList.toggle(WARNING_CLASS, warning);
+    if (tone) {
+      heading.classList.add(TONE_CLASSES[tone]);
+    }
     heading.textContent = text;
     container.appendChild(heading);
   }
 
-  function addList(items: string[], warning = false): void {
+  function addList(items: string[], tone?: Tone): void {
     const list = document.createElement('ul');
     list.className = 'icos-freeze-report-list';
-    list.classList.toggle(WARNING_CLASS, warning);
+    if (tone) {
+      list.classList.add(TONE_CLASSES[tone]);
+    }
     items.forEach(item => {
       const listItem = document.createElement('li');
       listItem.textContent = item;
@@ -587,28 +625,68 @@ function createReport(): IReport {
     container.appendChild(child);
   }
 
-  return { node: container, addLine, addWarningLine, addHeading, addList, append };
+  return { node: container, addLine, addIssue, addHeading, addList, append };
 }
 
-function renderTop(
+function createStep(title: string, instruction: string, ...children: HTMLElement[]): HTMLElement {
+  const step = document.createElement('section');
+  step.className = 'icos-freeze-step';
+
+  const heading = document.createElement('h3');
+  heading.className = 'icos-freeze-step-heading';
+  heading.textContent = title;
+
+  const text = document.createElement('div');
+  text.className = 'icos-freeze-step-instruction';
+  text.textContent = instruction;
+
+  step.append(heading, text, ...children);
+  return step;
+}
+
+function renderIssues(
   report: IReport,
   snapshot: IFreezeSnapshot,
-  path: string,
-  preview: { open: boolean }
+  folder: string,
+  details: { open: boolean }
 ): void {
   const conflicts = snapshot.conflicts ?? [];
-  renderConflicts(report, conflicts);
-  renderDockerfile(report, snapshot, freezeFolder(path), conflicts, preview);
+  if (snapshot.bundle_available === true && conflicts.length === 0) {
+    report.addIssue('Nothing prevents the package from being created.', 'success');
+  } else {
+    renderBlocking(report, snapshot, conflicts);
+  }
+
+  renderMissing(report, snapshot.missing ?? []);
+  renderUnreadable(report, snapshot.unreadable_notebooks ?? []);
   renderRequirementsWarnings(report, snapshot.requirements_warnings ?? []);
+  report.append(createDetails(snapshot, folder, details));
 }
 
-function renderBottom(report: IReport, snapshot: IFreezeSnapshot): void {
-  renderMissing(report, snapshot.missing ?? []);
-  renderLocalModules(report, snapshot.local_modules ?? []);
-  renderUnreadable(report, snapshot.unreadable_notebooks ?? []);
+function createDetails(
+  snapshot: IFreezeSnapshot,
+  folder: string,
+  state: { open: boolean }
+): HTMLDetailsElement {
+  const details = document.createElement('details');
+  details.className = 'icos-freeze-details';
+  details.open = state.open;
+  details.addEventListener('toggle', () => {
+    state.open = details.open;
+  });
+
+  const summary = document.createElement('summary');
+  summary.textContent = 'Details';
+
+  const report = createReport();
+  renderDockerfile(report, snapshot, folder);
   renderEnvironment(report, snapshot);
-  renderDependencyFiles(report, snapshot.requirements ?? []);
   renderNotebooks(report, snapshot.notebooks ?? []);
+  renderDependencyFiles(report, snapshot.requirements ?? []);
+  renderLocalModules(report, snapshot.local_modules ?? []);
+
+  details.append(summary, report.node);
+  return details;
 }
 
 function createFileSelection(
@@ -626,7 +704,6 @@ function createFileSelection(
   const node = document.createElement('div');
   node.className = 'icos-freeze-files';
   const section = createReport();
-  section.addHeading('Files');
   node.append(section.node);
 
   if (files.length === 0) {
@@ -840,23 +917,13 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function renderConflicts(report: IReport, conflicts: IFreezeConflict[]): void {
-  if (conflicts.length === 0) {
-    report.addHeading('Conflicts');
-    report.addLine('No version conflicts found.');
-  } else {
-    report.addHeading(`Conflicts (${conflicts.length})`, true);
-    conflicts.forEach(conflict => addConflictBlock(report, conflict));
-  }
-}
-
 // Nothing is sent to the server: picking a version only prints an edit.
 function addConflictBlock(report: IReport, conflict: IFreezeConflict): void {
   const block = document.createElement('div');
   block.className = 'icos-freeze-conflict';
 
   const summary = document.createElement('div');
-  summary.className = WARNING_CLASS;
+  summary.className = TONE_CLASSES.error;
   const notebookVersion = formatVersion(conflict.notebook_version);
   const requirementsVersion = formatVersion(conflict.requirements_version);
   summary.textContent =
@@ -903,44 +970,25 @@ function addConflictBlock(report: IReport, conflict: IFreezeConflict): void {
   }
 }
 
-function renderDockerfile(
-  report: IReport,
-  snapshot: IFreezeSnapshot,
-  folder: string,
-  conflicts: IFreezeConflict[],
-  preview: { open: boolean }
-): void {
-  report.addHeading('Dockerfile');
-
-  if (snapshot.bundle_available !== true) {
-    renderDockerfileBlocked(report, snapshot, conflicts);
+function renderDockerfile(report: IReport, snapshot: IFreezeSnapshot, folder: string): void {
+  if (!snapshot.dockerfile) {
     return;
   }
 
+  report.addHeading('Dockerfile');
   report.addLine(
-    'Nothing blocks the freeze. Nothing has been written yet: the Dockerfile and the ' +
-      `selected files go into "${folder}" when the package is downloaded. ` +
+    'Nothing has been written yet: the Dockerfile and the selected files go into ' +
+      `"${folder}" when the package is downloaded. ` +
       'The folder is hidden, so the file browser does not show it.'
   );
 
-  if (snapshot.dockerfile) {
-    const details = document.createElement('details');
-    details.className = 'icos-freeze-dockerfile';
-    details.open = preview.open;
-    details.addEventListener('toggle', () => {
-      preview.open = details.open;
-    });
-
-    const summary = document.createElement('summary');
-    summary.textContent = 'Show the Dockerfile';
-    const code = document.createElement('pre');
-    code.textContent = snapshot.dockerfile;
-    details.append(summary, code);
-    report.append(details);
-  }
+  const code = document.createElement('pre');
+  code.className = 'icos-freeze-dockerfile';
+  code.textContent = snapshot.dockerfile;
+  report.append(code);
 }
 
-function renderDockerfileBlocked(
+function renderBlocking(
   report: IReport,
   snapshot: IFreezeSnapshot,
   conflicts: IFreezeConflict[]
@@ -950,7 +998,7 @@ function renderDockerfileBlocked(
   // Conflicts are checked first because _dockerfile_block_reason checks
   // them first: a directory with both is blocked on the conflict.
   if (conflicts.length === 0 && notebookInstalls.length > 0) {
-    report.addWarningLine('Changes needed before this can be frozen:');
+    report.addIssue('Changes needed before this can be frozen:', 'error');
 
     notebookInstalls.forEach(install => {
       const line = document.createElement('div');
@@ -971,29 +1019,29 @@ function renderDockerfileBlocked(
     return;
   }
 
-  if (snapshot.dockerfile_blocked) {
-    report.addWarningLine(snapshot.dockerfile_blocked);
+  report.addIssue(
+    snapshot.dockerfile_blocked ?? 'The server reported that this directory cannot be packaged.',
+    'error'
+  );
+  if (conflicts.length > 0) {
+    report.addHeading(`Conflicts (${conflicts.length})`, 'error');
+    conflicts.forEach(conflict => addConflictBlock(report, conflict));
   }
   report.addLine(
-    'Fix the files in this directory and freeze again, or change the selection above, ' +
+    'Fix the files in this directory and freeze again, or change the selection in step 1, ' +
       'to get a Dockerfile.'
   );
 }
 
 function renderRequirementsWarnings(report: IReport, warnings: string[]): void {
   if (warnings.length > 0) {
-    report.addHeading(`Differences from your session (${warnings.length})`, true);
-    report.addList(warnings, true);
+    report.addHeading(`Differences from your session (${warnings.length})`, 'warning');
+    report.addList(warnings, 'warning');
   }
 }
 
 function createPackageSection(path: string, include: () => string[]): IPackageSection {
   const report = createReport();
-  report.addHeading('Package');
-
-  const description = document.createElement('div');
-  description.textContent =
-    'The package holds the Dockerfile, the selected files and instructions for a tester.';
 
   const nameInput = document.createElement('input');
   nameInput.type = 'text';
@@ -1002,25 +1050,19 @@ function createPackageSection(path: string, include: () => string[]): IPackageSe
 
   const nameLabel = document.createElement('label');
   nameLabel.className = 'icos-freeze-package-name';
-  nameLabel.append('Name the package', nameInput);
+  nameLabel.append('Package name', nameInput);
 
   const packageButton = document.createElement('button');
   packageButton.type = 'button';
   packageButton.className = 'jp-Dialog-button jp-mod-accept jp-mod-styled';
   packageButton.textContent = 'Download package';
 
+  const row = document.createElement('div');
+  row.className = 'icos-freeze-package-row';
+  row.append(nameLabel, packageButton);
+
   const hint = document.createElement('div');
   hint.className = 'icos-freeze-package-hint';
-
-  const steps = document.createElement('ol');
-  steps.className = 'icos-freeze-package-steps';
-  const checkStep = document.createElement('li');
-  checkStep.textContent = 'Check the selected files and any problems in this report.';
-  const nameStep = document.createElement('li');
-  nameStep.append(nameLabel);
-  const downloadStep = document.createElement('li');
-  downloadStep.append(packageButton, hint);
-  steps.append(checkStep, nameStep, downloadStep);
 
   const packageStatus = document.createElement('div');
   packageStatus.className = 'icos-freeze-report-status';
@@ -1031,8 +1073,8 @@ function createPackageSection(path: string, include: () => string[]): IPackageSe
   nextSteps.setAttribute('role', 'status');
   nextSteps.hidden = true;
 
-  report.append(description);
-  report.append(steps);
+  report.append(row);
+  report.append(hint);
   report.append(packageStatus);
   report.append(nextSteps);
 
@@ -1041,7 +1083,6 @@ function createPackageSection(path: string, include: () => string[]): IPackageSe
   const packageName = (): string => nameInput.value.trim();
 
   let available = false;
-  let blockedReason: string | null = null;
   let pending = false;
   let downloading = false;
 
@@ -1052,11 +1093,7 @@ function createPackageSection(path: string, include: () => string[]): IPackageSe
     packageButton.disabled = !available || pending || downloading || packageName() === '';
 
     if (!available) {
-      const reason = blockedReason ? ` ${blockedReason}` : '';
-      setHint(
-        `The package cannot be made yet.${reason} The Dockerfile section above says what to fix.`,
-        true
-      );
+      setHint('The package cannot be created until the problem in step 2 is resolved.', true);
     } else if (pending) {
       setHint('Waiting for the report to update.');
     } else if (packageName() === '' && !downloading) {
@@ -1116,9 +1153,8 @@ function createPackageSection(path: string, include: () => string[]): IPackageSe
 
   return {
     node: report.node,
-    setAvailable: (value, reason) => {
+    setAvailable: value => {
       available = value;
-      blockedReason = reason ?? null;
       refresh();
     },
     setPending: value => {
@@ -1209,7 +1245,7 @@ function showNextSteps(node: HTMLElement, result: IDownloadedPackage, folder: st
   [
     `"${result.filename}" was downloaded.${savedNote}`,
     'Give the zip to the tester.',
-    'The README.md inside the zip explains how to build and run it.'
+    'The HOW_TO_RUN.md inside the zip explains how to build and run it.'
   ].forEach(text => {
     const item = document.createElement('li');
     item.textContent = text;
@@ -1237,8 +1273,8 @@ function filenameFrom(disposition: string | null): string {
 
 function renderMissing(report: IReport, missing: string[]): void {
   if (missing.length > 0) {
-    report.addHeading(`Not installed (${missing.length})`, true);
-    report.addList(missing, true);
+    report.addHeading(`Not installed (${missing.length})`, 'warning');
+    report.addList(missing, 'warning');
     report.addLine(
       'These packages are imported by the selected notebooks but are not installed in this environment, ' +
         'so the build cannot reproduce them.'
@@ -1253,12 +1289,22 @@ function renderLocalModules(report: IReport, modules: string[]): void {
   }
 }
 
+function renderLeftOut(report: IReport, files: IFreezeLeftOut[]): void {
+  if (files.length > 0) {
+    report.addHeading(`Left out (${files.length})`, 'warning');
+    report.addList(
+      files.map(file => `${file.path}: ${file.reason}`),
+      'warning'
+    );
+  }
+}
+
 function renderUnreadable(report: IReport, notebooks: IFreezeUnreadable[]): void {
   if (notebooks.length > 0) {
-    report.addHeading(`Notebooks not checked (${notebooks.length})`, true);
+    report.addHeading(`Notebooks not checked (${notebooks.length})`, 'warning');
     report.addList(
       notebooks.map(notebook => `${notebook.path}: ${notebook.reason}`),
-      true
+      'warning'
     );
     report.addLine(
       'These notebooks are copied into the package, but their imports were not checked.'

@@ -713,9 +713,62 @@
   line-height: inherit;
 }
 
-/* The Files section always opens the report. */
-.icos-freeze-files .icos-freeze-report-heading {
-  margin-top: 0;
+.icos-freeze-step + .icos-freeze-step {
+  margin-top: 16px;
+}
+
+.icos-freeze-step-heading {
+  margin: 0;
+  color: var(--jp-ui-font-color0);
+  font-size: var(--jp-ui-font-size2, 15px);
+  font-weight: bold;
+  line-height: inherit;
+}
+
+.icos-freeze-step-instruction {
+  margin-bottom: 4px;
+  color: var(--jp-ui-font-color1);
+}
+
+.icos-freeze-issue {
+  margin-top: 4px;
+  font-weight: bold;
+}
+
+.icos-freeze-issue::before,
+.icos-freeze-report-heading.icos-freeze-error::before,
+.icos-freeze-report-heading.icos-freeze-warning::before {
+  margin-right: 0.4em;
+}
+
+.icos-freeze-issue.icos-freeze-error::before,
+.icos-freeze-report-heading.icos-freeze-error::before {
+  content: '\2716';
+}
+
+.icos-freeze-report-heading.icos-freeze-warning::before {
+  content: '\26A0';
+}
+
+.icos-freeze-issue.icos-freeze-success::before {
+  content: '\2714';
+}
+
+.icos-freeze-error {
+  color: var(--jp-error-color1, #d32f2f);
+  font-weight: bold;
+}
+
+.icos-freeze-success {
+  color: var(--jp-success-color1, #388e3c);
+}
+
+.icos-freeze-details {
+  margin-top: 8px;
+}
+
+.icos-freeze-details > summary {
+  cursor: pointer;
 }
 
 .icos-freeze-report-list {
@@ -741,12 +794,11 @@
   gap: 6px;
 }
 
-.icos-freeze-package-steps {
-  margin: 4px 0 0;
-  padding-left: 1.5em;
-}
-
-.icos-freeze-package-steps > li {
+.icos-freeze-package-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
   margin-top: 4px;
 }
 
@@ -794,7 +846,7 @@
 }
 
 .icos-freeze-install {
-  color: var(--jp-warn-color1, #d9822b);
+  color: var(--jp-error-color1, #d32f2f);
 }
 
 .icos-freeze-install-name {
@@ -890,11 +942,7 @@ button.icos-freeze-tree-toggle[aria-expanded='true']::before {
   font-variant-numeric: tabular-nums;
 }
 
-.icos-freeze-dockerfile summary {
-  cursor: pointer;
-}
-
-.icos-freeze-dockerfile pre {
+.icos-freeze-dockerfile {
   max-height: 200px;
   margin: 4px 0 0;
   padding: 4px 6px;

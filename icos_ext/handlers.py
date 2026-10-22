@@ -94,6 +94,13 @@ MANIFEST_NAME = "icos-freeze.json"
 # out an earlier selection leaves these, and every "*.zip", in place.
 GENERATED_IN_CONTEXT = frozenset({DOCKERFILE_NAME, DOCKERIGNORE_NAME, MANIFEST_NAME})
 
+# The handover package: the files it generates beside the build
+# context. Both are package members only — nothing writes them into
+# FREEZE_DIR_NAME. The README is not called README.md so that a user's
+# own README.md can travel in the package and the image.
+BUNDLE_README_NAME = "HOW_TO_RUN.md"
+BUNDLE_COMPOSE_NAME = "docker-compose.yml"
+
 # Folders and files the listing never offers for a freeze, at any depth.
 UNLISTED_DIR_NAMES = frozenset({
     FREEZE_DIR_NAME,
@@ -110,9 +117,9 @@ UNLISTED_SUFFIXES = (".zip", ".pyc")
 UNLISTED_TOP_LEVEL_NAMES = frozenset({
     DOCKERFILE_NAME,
     DOCKERIGNORE_NAME,
-    "docker-compose.yml",
+    BUNDLE_COMPOSE_NAME,
     MANIFEST_NAME,
-    "README.md",
+    BUNDLE_README_NAME,
 })
 
 MAX_LISTED_FILES = 5000
@@ -133,7 +140,7 @@ MAX_LISTED_FILES = 5000
 # The last five are the build scaffolding and the paperwork. The
 # Dockerfile, this exclusion list and the compose file describe how the
 # image is built and run, so they mean nothing to a process inside it.
-# The manifest and the README are the tester's, not the container's:
+# The manifest and BUNDLE_README_NAME are the tester's, not the container's:
 # the image holds the work, while the package holds the instructions
 # and the record of what was frozen.
 #
@@ -147,14 +154,8 @@ DOCKERIGNORE_ENTRIES = (
     ".dockerignore",
     "docker-compose.yml",
     "icos-freeze.json",
-    "README.md",
+    BUNDLE_README_NAME,
 )
-
-# The handover package: the files it generates beside the build
-# context. Both are package members only — nothing writes them into
-# FREEZE_DIR_NAME.
-BUNDLE_README_NAME = "README.md"
-BUNDLE_COMPOSE_NAME = "docker-compose.yml"
 
 # The host port the compose file publishes the lab on. Not 8888: the
 # person freezing is already running JupyterLab on that port, so the
@@ -349,6 +350,28 @@ def _is_listed_name(name, top_level):
     if name in UNLISTED_FILE_NAMES or name.endswith(UNLISTED_SUFFIXES):
         return False
     return not (top_level and name in UNLISTED_TOP_LEVEL_NAMES)
+
+
+def _left_out(directory):
+    """Return the user's top-level files the package replaces with its own.
+
+    One {"path", "reason"} per name in UNLISTED_TOP_LEVEL_NAMES that
+    *directory* holds as a file, sorted by path. The listing never offers
+    them, so without this they would be dropped without a word.
+    """
+    left_out = []
+    for name in sorted(UNLISTED_TOP_LEVEL_NAMES):
+        try:
+            present = (directory / name).is_file()
+        except OSError:
+            continue
+        if present:
+            left_out.append({
+                "path": name,
+                "reason": f"The package writes its own {name}, so yours is"
+                " not included.",
+            })
+    return left_out
 
 
 def _is_hidden(path):
@@ -1791,8 +1814,8 @@ def _generate_dockerignore():
         " the image is",
         "# built and run, so none of them belongs inside it.",
         "#",
-        f"# The freeze manifest {MANIFEST_NAME} and the README are"
-        " excluded for the",
+        f"# The freeze manifest {MANIFEST_NAME} and {BUNDLE_README_NAME}"
+        " are excluded for the",
         "# same reason: the image holds the work, while the package"
         " holds the",
         "# instructions and the record of what was frozen.",
@@ -1841,6 +1864,7 @@ def _manifest_document(image, snapshot):
         "python_version": snapshot["python_version"],
         "provenance_method": snapshot["provenance_method"],
         "files": list(snapshot["include"]),
+        "left_out": [dict(entry) for entry in snapshot["left_out"]],
         "notebooks": [item["name"] for item in snapshot["notebooks"]],
         "unreadable_notebooks": list(snapshot["unreadable_notebooks"]),
         "requirements": [item["name"] for item in snapshot["requirements"]],
@@ -2126,6 +2150,7 @@ def _generate_bundle_readme(directory, tag, manifest, members, snapshot):
         grouped[kinds.get(path, "other")].append(path)
 
     contents = [
+        f"- `{BUNDLE_README_NAME}`: this file",
         f"- `{DOCKERFILE_NAME}`, `{DOCKERIGNORE_NAME}`: the build context",
         f"- `{BUNDLE_COMPOSE_NAME}`: brings the environment up with one"
         " command",
@@ -2376,9 +2401,9 @@ def _freeze_snapshot(handler, path, include, exclude=None):
     The keys are "directory", "files", "files_truncated", "include",
     "sources", "requirements", "notebooks", "unreadable_notebooks",
     "local_modules", "conflicts", "notebook_installs", "environment",
-    "user_installed", "missing", "contract", "python_version" and
-    "provenance_method". "sources" maps each listed path to the file on
-    disk and stays on the server. It is a mapping rather than a tuple
+    "user_installed", "missing", "contract", "python_version",
+    "provenance_method" and "left_out". "sources" maps each listed path
+    to the file on disk and stays on the server. It is a mapping rather than a tuple
     because "environment" and "user_installed" are both lists of package
     records, and positional unpacking is one edit away from silently
     swapping them.
@@ -2442,6 +2467,7 @@ def _freeze_snapshot(handler, path, include, exclude=None):
         "contract": _check_contract(requirements, user_installed, scan, notebooks),
         "python_version": scan["python_version"],
         "provenance_method": scan["provenance_method"],
+        "left_out": _left_out(directory),
     }
 
 
@@ -2516,6 +2542,7 @@ class FreezeHandler(APIHandler):
             "files": snapshot["files"],
             "files_truncated": snapshot["files_truncated"],
             "include": snapshot["include"],
+            "left_out": snapshot["left_out"],
             "environment": snapshot["environment"],
             "user_installed": snapshot["user_installed"],
             "missing": snapshot["missing"],
