@@ -41,6 +41,11 @@ interface IFreezeEnvPackage {
   manager: string | null;
 }
 
+interface IFreezeUnusedPackage {
+  name: string;
+  version: string | null;
+}
+
 type FreezeFileKind = 'notebook' | 'requirements' | 'local_code' | 'other';
 
 interface IFreezeFile {
@@ -80,6 +85,7 @@ interface IFreezeSnapshot {
   unreadable_notebooks?: IFreezeUnreadable[];
   files_truncated?: boolean;
   left_out?: IFreezeLeftOut[];
+  unused_installed?: IFreezeUnusedPackage[];
 }
 
 interface IFreezeFolder {
@@ -660,6 +666,7 @@ function renderIssues(
   renderMissing(report, snapshot.missing ?? []);
   renderUnreadable(report, snapshot.unreadable_notebooks ?? []);
   renderRequirementsWarnings(report, snapshot.requirements_warnings ?? []);
+  renderUnusedInstalled(report, snapshot.unused_installed ?? []);
   report.append(createDetails(snapshot, folder, details));
 }
 
@@ -1037,6 +1044,20 @@ function renderRequirementsWarnings(report: IReport, warnings: string[]): void {
   if (warnings.length > 0) {
     report.addHeading(`Differences from your session (${warnings.length})`, 'warning');
     report.addList(warnings, 'warning');
+  }
+}
+
+function renderUnusedInstalled(report: IReport, packages: IFreezeUnusedPackage[]): void {
+  if (packages.length > 0) {
+    report.addHeading(`Installed but not used (${packages.length})`, 'warning');
+    report.addList(
+      packages.map(pkg => (pkg.version !== null ? `${pkg.name}==${pkg.version}` : pkg.name)),
+      'warning'
+    );
+    report.addLine(
+      'These are installed in your session, but no selected file imports them, so they are not included. ' +
+        'If the notebooks need one (for example through a !command), add it to requirements.txt as name==version.'
+    );
   }
 }
 

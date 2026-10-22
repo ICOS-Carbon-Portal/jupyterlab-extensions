@@ -36,7 +36,9 @@ steps:
      says "Nothing prevents the package from being created."
    - Warnings follow: packages your notebooks import that are not
      installed here, notebooks that could not be read (listed as not
-     checked), and where the image will differ from your session.
+     checked), where the image will differ from your session, and
+     packages that are installed but not used (see
+     [The rules](#the-rules)).
    - A collapsed Details section holds the rest: the Dockerfile, the
      base image and Python version, what you installed on top of the
      image, the dependency files found, each notebook with its
@@ -77,9 +79,10 @@ not packaged. The list stops at 5000 files, and the report warns when
 it does.
 
 Changing a tick checks the report again. Only ticked notebooks count for
-missing packages, install cells and version conflicts. If you untick
-your own code that a notebook imports, it shows up as a missing package,
-because the package would no longer hold it.
+install cells and version conflicts. Missing packages and your own code
+are found from the imports in ticked notebooks and ticked `.py` files.
+If you untick your own code that a notebook imports, it shows up as a
+missing package, because the package would no longer hold it.
 
 Your own code is not mistaken for a package to install. An import that
 matches a ticked file or folder of yours is not reported as missing.
@@ -114,13 +117,26 @@ Freeze is blocked until all of these hold:
   - URLs
   - environment markers, such as `; python_version < "3.12"`
 - **Each package appears once.** A package pinned twice is refused.
-- **What you installed yourself is listed.** If you ran `pip install`
-  in your session, that package must be in the file. Packages it pulled
-  in as dependencies do not need a line: pip installs them.
+- **What you installed and use is listed.** If you installed a package
+  in your session, for example with `pip install` or
+  `pip install --user`, and a ticked file uses it, that package must be
+  in the file. A package counts as used when a ticked notebook imports
+  it, a ticked `.py` file imports it anywhere, or an install cell in a
+  ticked notebook installs it. Packages it pulled in as dependencies do
+  not need a line: pip installs them.
 - **Changed image packages your notebooks use are listed.** If a
   notebook imports a package the image ships, and your session has a
   different version, pin it. This happens after something like
   `pip install -U numpy`.
+
+Packages you installed that no ticked file uses do not block. Step 2
+lists them as a warning, Installed but not used, and they are left out
+of the image. Freeze cannot see every use: a package run through a
+`!command` is not detected. If your notebooks need one of these
+packages, add it to `requirements.txt` as `name==version`.
+
+Every package pinned in `requirements.txt` is installed, whether or not
+anything uses it.
 
 The report says what to add. For example:
 
@@ -150,7 +166,9 @@ The image will have 2.3.1.
 
 Warnings show in the freeze report, in `icos-freeze.json` under
 `requirements_warnings`, and in the package's `HOW_TO_RUN.md`. If a
-result does not reproduce, look there first.
+result does not reproduce, look there first. Packages that are installed
+but not used are recorded in `icos-freeze.json` under
+`unused_installed`.
 
 ### Other dependency files
 

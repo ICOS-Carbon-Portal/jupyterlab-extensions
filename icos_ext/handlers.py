@@ -1,3 +1,4 @@
+import ast
 import importlib.metadata
 import io
 import json
@@ -679,6 +680,73 @@ def _collect_notebooks(paths, sources, cache):
     return notebooks, unreadable, sorted(local_modules)
 
 
+def _script_packages(file_path):
+    """Return the packages a ".py" file imports, or None when it cannot be read.
+
+    Every absolute import counts, wherever it sits in the file, since an
+    import inside a function runs just the same once it is called. Only
+    the root of a dotted module path is reported, standard-library
+    modules are left out, and relative imports are local by definition.
+    """
+    try:
+        with open(file_path, "rb") as handle:
+            raw = handle.read(MAX_NOTEBOOK_BYTES + 1)
+    except OSError as e:
+        log.warning("Freeze: cannot read %s: %s", file_path.name, e)
+        return None
+
+    if len(raw) > MAX_NOTEBOOK_BYTES:
+        log.warning("Freeze: %s is over %d bytes", file_path.name, MAX_NOTEBOOK_BYTES)
+        return None
+
+    try:
+        tree = ast.parse(raw, filename=file_path.name)
+    except (SyntaxError, ValueError, RecursionError) as e:
+        log.warning(
+            "Freeze: cannot parse %s, skipping its imports: %s", file_path.name, e
+        )
+        return None
+
+    modules = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            modules.append(node.module)
+
+    roots = {}
+    for module in modules:
+        root = module.split(".", 1)[0]
+        if root.isidentifier() and root not in STDLIB_MODULES:
+            roots.setdefault(root, {"name": root, "version": None, "source": "import"})
+    return list(roots.values())
+
+
+def _collect_scripts(paths, sources):
+    """Return (scripts, local_modules) for the selected ".py" files in *paths*.
+
+    Each script is {"name": path, "packages": [...]}, shaped like a
+    notebook record, and only scripts that import some package are
+    returned. Local imports are resolved as for notebooks, from the
+    script's own folder and the top of the frozen directory.
+    """
+    index = _module_index(paths)
+    scripts = []
+    local_modules = set()
+    for path in sorted(paths):
+        if not path.endswith(".py"):
+            continue
+        packages = _script_packages(sources[path])
+        if not packages:
+            continue
+        local = _local_imports(path, packages, index)
+        local_modules.update(local)
+        packages = [package for package in packages if package["name"] not in local]
+        if packages:
+            scripts.append({"name": path, "packages": packages})
+    return scripts, local_modules
+
+
 def _describe_files(files, sources, cache):
     """Return the listing entries with "kind" and "recommended", by path.
 
@@ -917,33 +985,41 @@ def _depended_on(requires, pins):
     return needed
 
 
-def _unlisted_top_level(user_installed, requires, pins):
-    """Return the top-level user installs requirements.txt does not pin.
+def _unlisted_top_level(user_installed, requires, pins, used):
+    """Return (unlisted, unused): the top-level user installs not pinned.
 
     Top-level means no other installed distribution depends on it, so
     nothing else would bring it back when the image is rebuilt from
-    requirements.txt. Dependencies are left to pip. Entries are
-    {"name", "version"}, in the order of *user_installed*.
+    requirements.txt. Dependencies are left to pip. *unlisted* holds
+    the ones whose normalised name is in *used*, which the selected
+    files need; *unused* holds the rest, which nothing selected needs.
+    Entries are {"name", "version"}, in the order of *user_installed*.
     """
     needed = _depended_on(requires, pins)
     unlisted = []
+    unused = []
     for entry in user_installed:
         key = _normalise_name(entry["name"])
         if key in pins or key in needed:
             continue
-        unlisted.append({
+        found = unlisted if key in used else unused
+        found.append({
             "name": entry["name"],
             "version": entry["installed_version"],
         })
-    return unlisted
+    return unlisted, unused
 
 
-def _check_contract(requirements, user_installed, scan, notebooks=()):
+def _check_contract(requirements, user_installed, scan, notebooks=(), used=()):
     """Return how the directory's requirements.txt stands against the session.
 
-    {"present", "pins", "invalid", "duplicates", "unlisted", "drifted",
-    "warnings"}. "unlisted" and "drifted" are computed against no pins
-    at all when the file is missing, so the block reason can say what to
+    {"present", "pins", "invalid", "duplicates", "unlisted",
+    "unused_installed", "drifted", "warnings"}. *used* is the normalised
+    names of the packages the selected files import or install. Only a
+    used top-level user install that the file does not pin is
+    "unlisted" and blocks; the unused ones are "unused_installed" and
+    do not. "unlisted" and "drifted" are computed against no pins at
+    all when the file is missing, so the block reason can say what to
     put in it. "warnings" never block: they say where the rebuilt image
     will differ from what the notebooks ran with.
     """
@@ -957,6 +1033,9 @@ def _check_contract(requirements, user_installed, scan, notebooks=()):
         parsed = _parse_contract(content)
 
     pins = parsed["pins"]
+    unlisted, unused = _unlisted_top_level(
+        user_installed, scan["requires"], pins, frozenset(used)
+    )
     return {
         "present": content is not None,
         "pins": pins,
@@ -965,7 +1044,8 @@ def _check_contract(requirements, user_installed, scan, notebooks=()):
             for line in parsed["invalid"]
         ],
         "duplicates": parsed["duplicates"],
-        "unlisted": _unlisted_top_level(user_installed, scan["requires"], pins),
+        "unlisted": unlisted,
+        "unused_installed": unused,
         "drifted": _drifted_imports(notebooks, scan, pins),
         "warnings": _contract_warnings(pins, scan["packages"]),
     }
@@ -1270,6 +1350,8 @@ def _resolve_package(token, environment):
 def _resolve_environment(notebooks, environment):
     """Return (entries, missing) for the packages the notebooks name.
 
+    *notebooks* may also hold script records of the same shape.
+
     *entries* holds one record per distinct package, sorted by
     normalised name; *missing* names the ones the running environment
     does not have at all, which is a hole no generated Dockerfile can
@@ -1300,12 +1382,9 @@ def _resolve_environment(notebooks, environment):
 def _user_installed(environment):
     """Return every package installed on top of the base image.
 
-    This is the whole user-installed set, not just the part the
-    notebooks happen to name: a package imported from a helper module
-    beside the notebooks, or pulled in as a pinned dependency of one the
-    notebooks do name, is just as much part of the environment being
-    frozen. Leaving it out would mean the rebuilt image resolves it
-    differently, or not at all.
+    This is the whole user-installed set, not just the part the selected
+    files name, so the report can show it. Only the used part blocks
+    the freeze, see _check_contract.
 
     Packages from the image's own build layer are left out, the same
     ones the generated Dockerfile refuses to pin, so the two views agree
@@ -1408,10 +1487,11 @@ def _contract_block_reason(contract):
     """Return why requirements.txt cannot be built from, or None.
 
     In order: the file is missing, it has lines that are not exact pins,
-    it pins a package twice, a package installed on top of the image is
-    not in it, or a notebook imports an image package at a version other
-    than the image's and the file does not pin it. Each is only worth
-    fixing once the one before it is.
+    it pins a package twice, a package installed on top of the image
+    that a selected notebook or script uses is not in it, or a notebook
+    imports an image package at a version other than the image's and
+    the file does not pin it. Installs nothing selected uses do not
+    block. Each is only worth fixing once the one before it is.
     """
     unlisted = contract["unlisted"]
     drifted = contract.get("drifted", [])
@@ -1675,7 +1755,7 @@ def _generate_dockerfile(
     if names:
         lines.extend([
             "",
-            "# Referenced by the notebooks but not installed in the"
+            "# Referenced by the selected files but not installed in the"
             " frozen",
             "# environment, so this build cannot reproduce them:",
         ])
@@ -1878,6 +1958,9 @@ def _manifest_document(image, snapshot):
             for entry in snapshot["user_installed"]
         ],
         "missing": list(snapshot["missing"]),
+        "unused_installed": [
+            dict(entry) for entry in snapshot["contract"]["unused_installed"]
+        ],
         "requirements_warnings": list(snapshot["contract"]["warnings"]),
     }
 
@@ -2265,9 +2348,10 @@ def _generate_bundle_readme(directory, tag, manifest, members, snapshot):
             "",
             "## Missing packages",
             "",
-            "The notebooks reference these, but they were not installed in"
-            " the frozen environment, so the build cannot reproduce them"
-            " and the notebooks that use them are expected to fail:",
+            "The selected files reference these, but they were not"
+            " installed in the frozen environment, so the build cannot"
+            " reproduce them and the notebooks or scripts that use them are"
+            " expected to fail:",
             "",
         ])
         lines.extend(f"- {item}" for item in names)
@@ -2442,11 +2526,14 @@ def _freeze_snapshot(handler, path, include, exclude=None):
     notebooks, unreadable, local_modules = _collect_notebooks(
         selected, sources, cache
     )
+    scripts, script_modules = _collect_scripts(selected, sources)
+    local_modules = sorted(set(local_modules) | script_modules)
     conflicts = _find_conflicts(notebooks, requirements)
     installs = _notebook_installs(notebooks)
 
     scan = _scan_environment()
-    environment, missing = _resolve_environment(notebooks, scan)
+    environment, missing = _resolve_environment(notebooks + scripts, scan)
+    used = {_normalise_name(entry["name"]) for entry in environment}
     user_installed = _user_installed(scan)
 
     return {
@@ -2464,7 +2551,9 @@ def _freeze_snapshot(handler, path, include, exclude=None):
         "environment": environment,
         "user_installed": user_installed,
         "missing": missing,
-        "contract": _check_contract(requirements, user_installed, scan, notebooks),
+        "contract": _check_contract(
+            requirements, user_installed, scan, notebooks, used
+        ),
         "python_version": scan["python_version"],
         "provenance_method": scan["provenance_method"],
         "left_out": _left_out(directory),
@@ -2545,6 +2634,7 @@ class FreezeHandler(APIHandler):
             "left_out": snapshot["left_out"],
             "environment": snapshot["environment"],
             "user_installed": snapshot["user_installed"],
+            "unused_installed": snapshot["contract"]["unused_installed"],
             "missing": snapshot["missing"],
             "conflicts": snapshot["conflicts"],
             "notebook_installs": snapshot["notebook_installs"],
