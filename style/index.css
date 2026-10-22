@@ -700,7 +700,7 @@
 
 /* Freeze report, shown in the dialog once a freeze finishes. */
 .icos-freeze-report {
-  max-height: 300px;
+  max-height: 60vh;
   overflow: auto;
   white-space: pre-wrap;
 }
@@ -713,7 +713,8 @@
   line-height: inherit;
 }
 
-.icos-freeze-report-heading:first-child {
+/* The Files section always opens the report. */
+.icos-freeze-files .icos-freeze-report-heading {
   margin-top: 0;
 }
 
@@ -733,7 +734,6 @@
   margin-top: 4px;
 }
 
-.icos-freeze-package,
 .icos-freeze-package-name {
   display: flex;
   flex-wrap: wrap;
@@ -741,8 +741,34 @@
   gap: 6px;
 }
 
-.icos-freeze-package {
+.icos-freeze-package-steps {
+  margin: 4px 0 0;
+  padding-left: 1.5em;
+}
+
+.icos-freeze-package-steps > li {
   margin-top: 4px;
+}
+
+.icos-freeze-package-hint {
+  margin-top: 2px;
+  color: var(--jp-ui-font-color2);
+}
+
+.icos-freeze-next-steps {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--jp-brand-color1);
+  background: var(--jp-layout-color2);
+}
+
+.icos-freeze-next-steps-heading {
+  font-weight: bold;
+}
+
+.icos-freeze-next-steps ul {
+  margin: 2px 0 0;
+  padding-left: 1.2em;
 }
 
 .icos-freeze-warning {
@@ -773,4 +799,109 @@
 
 .icos-freeze-install-name {
   font-weight: 600;
+}
+
+.icos-freeze-files-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 2px 0 4px;
+}
+
+/* The tree scrolls on its own so a long listing does not push the
+   analysis out of the report, and keeps its place across re-renders. */
+.icos-freeze-tree {
+  max-height: 200px;
+  margin: 0;
+  padding: 2px 4px;
+  overflow: auto;
+  border: 1px solid var(--jp-border-color2, #bdbdbd);
+  background: var(--jp-layout-color1);
+  list-style: none;
+  white-space: normal;
+}
+
+.icos-freeze-tree ul {
+  margin: 0;
+  padding-left: 16px;
+  list-style: none;
+}
+
+.icos-freeze-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 20px;
+}
+
+.icos-freeze-tree-toggle {
+  flex: none;
+  width: 16px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--jp-ui-font-color2);
+  font: inherit;
+  line-height: 1;
+}
+
+button.icos-freeze-tree-toggle {
+  cursor: pointer;
+}
+
+button.icos-freeze-tree-toggle::before {
+  content: '\25B8';
+  display: inline-block;
+  transition: transform 120ms ease;
+}
+
+button.icos-freeze-tree-toggle[aria-expanded='true']::before {
+  transform: rotate(90deg);
+}
+
+.icos-freeze-tree-name {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.icos-freeze-tree-name input {
+  margin: 0;
+}
+
+.icos-freeze-tree-badge {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: var(--jp-layout-color3);
+  color: var(--jp-ui-font-color1);
+  font-size: var(--jp-ui-font-size0, 11px);
+}
+
+.icos-freeze-tree-size {
+  flex: none;
+  color: var(--jp-ui-font-color2);
+  font-size: var(--jp-ui-font-size0, 11px);
+  font-variant-numeric: tabular-nums;
+}
+
+.icos-freeze-dockerfile summary {
+  cursor: pointer;
+}
+
+.icos-freeze-dockerfile pre {
+  max-height: 200px;
+  margin: 4px 0 0;
+  padding: 4px 6px;
+  overflow: auto;
+  background: var(--jp-layout-color2);
+  color: var(--jp-content-font-color1);
+  font-family: var(--jp-code-font-family);
+  font-size: var(--jp-code-font-size);
+  white-space: pre;
 }

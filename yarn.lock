@@ -1099,7 +1099,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@jupyterlab/statedb@npm:^4.6.4":
+"@jupyterlab/statedb@npm:^4.0.0, @jupyterlab/statedb@npm:^4.6.4":
   version: 4.6.4
   resolution: "@jupyterlab/statedb@npm:4.6.4"
   dependencies:
@@ -4488,6 +4488,7 @@ __metadata:
     "@jupyterlab/notebook": ^4.0.0
     "@jupyterlab/services": ^7.0.0
     "@jupyterlab/settingregistry": ^4.0.0
+    "@jupyterlab/statedb": ^4.0.0
     "@lumino/widgets": ^2.5.0
     "@types/json-schema": ^7.0.11
     "@types/react": ^18.0.26

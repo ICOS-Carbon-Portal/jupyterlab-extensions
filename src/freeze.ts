@@ -5,6 +5,7 @@ import { IDefaultFileBrowser } from '@jupyterlab/filebrowser';
 import { Widget } from '@lumino/widgets';
 import { PageConfig } from '@jupyterlab/coreutils';
 import { ServerConnection } from '@jupyterlab/services';
+import { IStateDB } from '@jupyterlab/statedb';
 
 interface IFreezeRequirement {
   name: string;
@@ -40,7 +41,19 @@ interface IFreezeEnvPackage {
   manager: string | null;
 }
 
-type DockerfileOutcome = 'written' | 'unchanged' | 'skipped_foreign' | 'error';
+type FreezeFileKind = 'notebook' | 'requirements' | 'local_code' | 'other';
+
+interface IFreezeFile {
+  path: string;
+  size: number;
+  kind: FreezeFileKind;
+  recommended: boolean;
+}
+
+interface IFreezeUnreadable {
+  path: string;
+  reason: string;
+}
 
 interface IFreezeSnapshot {
   image: string | null;
@@ -54,8 +67,43 @@ interface IFreezeSnapshot {
   user_installed?: IFreezeEnvPackage[];
   missing?: string[];
   requirements_warnings?: string[];
-  dockerfile_written: DockerfileOutcome | null;
+  dockerfile?: string | null;
   bundle_available?: boolean;
+  files?: IFreezeFile[];
+  include?: string[];
+  local_modules?: string[];
+  unreadable_notebooks?: IFreezeUnreadable[];
+  files_truncated?: boolean;
+}
+
+interface IFreezeFolder {
+  name: string;
+  path: string;
+  folders: Map<string, IFreezeFolder>;
+  files: IFreezeFile[];
+}
+
+interface ISavedSelection {
+  excluded: string[];
+  added: string[];
+}
+
+interface IFileSelection {
+  node: HTMLDivElement;
+  include: () => string[];
+  saved: () => ISavedSelection;
+  setStatus: (text: string, warn?: boolean) => void;
+}
+
+interface IPackageSection {
+  node: HTMLDivElement;
+  setAvailable: (available: boolean, blockedReason?: string | null) => void;
+  setPending: (pending: boolean) => void;
+}
+
+interface IDownloadedPackage {
+  filename: string;
+  saved: boolean;
 }
 
 interface IFreezeBundleBlocked {
@@ -82,6 +130,17 @@ const BASELINE_PROVENANCE = 'baseline';
 
 const WARNING_CLASS = 'icos-freeze-warning';
 
+const RECHECK_DELAY_MS = 400;
+
+const SELECTION_KEY = 'icos-freeze:excluded:';
+
+const KIND_LABELS: Record<FreezeFileKind, string | null> = {
+  notebook: 'notebook',
+  requirements: 'requirements',
+  local_code: 'local code',
+  other: null
+};
+
 const FREEZE_PHRASES = [
   'Putting your notebooks on ice...',
   'Cryogenically preserving your code...',
@@ -103,10 +162,15 @@ const freeze: JupyterFrontEndPlugin<void> = {
   id: '@icos-ext/freeze',
   autoStart: true,
   requires: [IDefaultFileBrowser],
+  optional: [IStateDB],
   activate: activateFreeze
 };
 
-function activateFreeze(app: JupyterFrontEnd, fileBrowser: IDefaultFileBrowser): void {
+function activateFreeze(
+  app: JupyterFrontEnd,
+  fileBrowser: IDefaultFileBrowser,
+  state: IStateDB | null
+): void {
   // A real <button>: focus and Enter/Space activation come for free.
   const button = document.createElement('button');
   button.type = 'button';
@@ -156,52 +220,88 @@ function activateFreeze(app: JupyterFrontEnd, fileBrowser: IDefaultFileBrowser):
   }
 
   async function performSnapshot(path: string): Promise<void> {
-    const query = encodeURIComponent(path);
-    const url = `${PageConfig.getBaseUrl()}icos-ext/freeze?path=${query}`;
-
-    const response = await freezeRequest(url, { method: 'GET' });
-    if (!response) {
-      await showFreezeError(unreachableMessage('freeze', path));
+    const saved = await loadSelection(state, path);
+    const first = await restoredSnapshot(path, saved);
+    if (typeof first === 'string') {
+      await showFreezeError(first);
       return;
     }
 
-    if (!response.ok) {
-      logHttpFailure(url, response);
-      await showFreezeError(httpFailureMessage('freeze', path, response));
-      return;
+    const container = document.createElement('div');
+    container.className = 'icos-freeze-report';
+
+    // The report scrolls but often holds nothing focusable, so without this
+    // a keyboard user cannot reach the scroll container.
+    container.tabIndex = 0;
+
+    // Everything below the file tree is re-rendered on each change of
+    // selection; above it, a change in height would shift the tree under
+    // the pointer.
+    const selection = createFileSelection(
+      first,
+      initialSelection(first, saved.excluded),
+      onSelectionChange
+    );
+    const top = createReport();
+    const bottom = createReport();
+    const packageSection = createPackageSection(path, selection.include);
+    container.append(selection.node, top.node, packageSection.node, bottom.node);
+
+    const preview = { open: false };
+    const render = (snapshot: IFreezeSnapshot): void => {
+      const scroll = container.scrollTop;
+      top.node.replaceChildren();
+      bottom.node.replaceChildren();
+      renderTop(top, snapshot, path, preview);
+      renderBottom(bottom, snapshot);
+      packageSection.setAvailable(snapshot.bundle_available === true, snapshot.dockerfile_blocked);
+      container.scrollTop = scroll;
+    };
+    render(first);
+
+    let generation = 0;
+    let timer: number | undefined;
+
+    function onSelectionChange(): void {
+      void saveSelection(state, path, selection.saved());
+      generation += 1;
+      const current = generation;
+      packageSection.setPending(true);
+      selection.setStatus('Updating the report...');
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => void recheck(current), RECHECK_DELAY_MS);
     }
 
-    let snapshot: IFreezeSnapshot;
-    try {
-      snapshot = (await response.json()) as IFreezeSnapshot;
-    } catch (error) {
-      logUnreadable(url, error);
-      await showFreezeError('The server sent a response that could not be read.');
-      return;
+    async function recheck(current: number): Promise<void> {
+      if (!container.isConnected) {
+        return;
+      }
+      const result = await requestSnapshot(path, selection.include(), []);
+      if (current !== generation) {
+        return;
+      }
+      packageSection.setPending(false);
+      if (typeof result === 'string') {
+        selection.setStatus(
+          `The report could not be updated: ${result} It still shows the previous selection.`,
+          true
+        );
+        return;
+      }
+      selection.setStatus('');
+      render(result);
     }
-
-    const directory = displayPath(path);
-    const conflicts = snapshot.conflicts ?? [];
-
-    const report = createReport();
-    renderConflicts(report, conflicts);
-    renderDockerfile(report, snapshot, freezeFolder(path), conflicts);
-    renderRequirementsWarnings(report, snapshot.requirements_warnings ?? []);
-    renderPackage(report, snapshot.bundle_available, path);
-    renderMissing(report, snapshot.missing ?? []);
-    renderEnvironment(report, snapshot);
-    renderDependencyFiles(report, snapshot.requirements ?? []);
-    renderNotebooks(report, snapshot.notebooks ?? []);
 
     // The freeze is over once the report is ready, so the button resets
     // here rather than when the dialog is dismissed.
     setFreezeBusy(false);
 
     await showDialog({
-      title: `Freeze: ${directory}`,
-      body: new Widget({ node: report.node }),
-      buttons: [Dialog.okButton()]
+      title: `Freeze: ${displayPath(path)}`,
+      body: new Widget({ node: container }),
+      buttons: [Dialog.cancelButton({ label: 'Close' })]
     });
+    window.clearTimeout(timer);
   }
 
   // The button and both palette commands all funnel through here, so a
@@ -297,6 +397,122 @@ async function freezeRequest(url: string, init: RequestInit): Promise<Response |
   }
 }
 
+function jsonPost(body: unknown): RequestInit {
+  return {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  };
+}
+
+// Hidden files are never recommended, so the server's exclude cannot add
+// them back; a second request with the full list does.
+async function restoredSnapshot(
+  path: string,
+  saved: ISavedSelection
+): Promise<IFreezeSnapshot | string> {
+  const first = await requestSnapshot(path, null, saved.excluded);
+  if (typeof first === 'string') {
+    return first;
+  }
+
+  const listed = new Set((first.files ?? []).map(file => file.path));
+  const added = saved.added.filter(file => listed.has(file));
+  if (added.length === 0) {
+    return first;
+  }
+
+  const include = new Set([...initialSelection(first, saved.excluded), ...added]);
+  const second = await requestSnapshot(path, [...include].sort(), []);
+  return typeof second === 'string' ? first : second;
+}
+
+// The server reports the selection it used; if it does not, the same rule
+// is applied here.
+function initialSelection(snapshot: IFreezeSnapshot, excluded: string[]): string[] {
+  if (snapshot.include) {
+    return snapshot.include;
+  }
+  const skip = new Set(excluded);
+  return (snapshot.files ?? [])
+    .filter(file => file.recommended && !skip.has(file.path))
+    .map(file => file.path);
+}
+
+async function loadSelection(state: IStateDB | null, path: string): Promise<ISavedSelection> {
+  const empty = { excluded: [], added: [] };
+  if (!state) {
+    return empty;
+  }
+  try {
+    const value = await state.fetch(SELECTION_KEY + path);
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return empty;
+    }
+    return {
+      excluded: 'excluded' in value ? stringList(value.excluded) : [],
+      added: 'added' in value ? stringList(value.added) : []
+    };
+  } catch (error) {
+    console.error('Freeze: could not read the saved file selection', error);
+    return empty;
+  }
+}
+
+// A selection equal to the recommended one is removed rather than saved,
+// which is also how "Reset to recommended" forgets it.
+async function saveSelection(
+  state: IStateDB | null,
+  path: string,
+  saved: ISavedSelection
+): Promise<void> {
+  if (!state) {
+    return;
+  }
+  const key = SELECTION_KEY + path;
+  try {
+    if (saved.excluded.length === 0 && saved.added.length === 0) {
+      await state.remove(key);
+    } else {
+      await state.save(key, { excluded: saved.excluded, added: saved.added });
+    }
+  } catch (error) {
+    console.error('Freeze: could not save the file selection', error);
+  }
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+// Resolves to the snapshot, or to a message saying why there is none.
+async function requestSnapshot(
+  path: string,
+  include: string[] | null,
+  exclude: string[]
+): Promise<IFreezeSnapshot | string> {
+  const url = `${PageConfig.getBaseUrl()}icos-ext/freeze`;
+
+  const response = await freezeRequest(url, jsonPost({ path, include, exclude }));
+  if (!response) {
+    return unreachableMessage('freeze', path);
+  }
+
+  if (!response.ok) {
+    logHttpFailure(url, response);
+    return httpFailureMessage('freeze', path, response);
+  }
+
+  try {
+    return (await response.json()) as IFreezeSnapshot;
+  } catch (error) {
+    logUnreadable(url, error);
+    return 'The server sent a response that could not be read.';
+  }
+}
+
 function unreachableMessage(verb: string, target: string): string {
   return (
     `Could not reach the server to ${verb} "${displayPath(target)}". ` +
@@ -332,11 +548,7 @@ function logHttpFailure(url: string, response: Response): void {
 
 function createReport(): IReport {
   const container = document.createElement('div');
-  container.className = 'icos-freeze-report';
-
-  // The report scrolls but often holds nothing focusable, so without this
-  // a keyboard user cannot reach the scroll container.
-  container.tabIndex = 0;
+  container.className = 'icos-freeze-report-section';
 
   function addLine(text: string): void {
     const line = document.createElement('div');
@@ -376,6 +588,256 @@ function createReport(): IReport {
   }
 
   return { node: container, addLine, addWarningLine, addHeading, addList, append };
+}
+
+function renderTop(
+  report: IReport,
+  snapshot: IFreezeSnapshot,
+  path: string,
+  preview: { open: boolean }
+): void {
+  const conflicts = snapshot.conflicts ?? [];
+  renderConflicts(report, conflicts);
+  renderDockerfile(report, snapshot, freezeFolder(path), conflicts, preview);
+  renderRequirementsWarnings(report, snapshot.requirements_warnings ?? []);
+}
+
+function renderBottom(report: IReport, snapshot: IFreezeSnapshot): void {
+  renderMissing(report, snapshot.missing ?? []);
+  renderLocalModules(report, snapshot.local_modules ?? []);
+  renderUnreadable(report, snapshot.unreadable_notebooks ?? []);
+  renderEnvironment(report, snapshot);
+  renderDependencyFiles(report, snapshot.requirements ?? []);
+  renderNotebooks(report, snapshot.notebooks ?? []);
+}
+
+function createFileSelection(
+  snapshot: IFreezeSnapshot,
+  initial: string[],
+  onChange: () => void
+): IFileSelection {
+  const files = snapshot.files ?? [];
+  const recommended = (): string[] => files.filter(file => file.recommended).map(file => file.path);
+  const selected = new Set(initial);
+
+  const fileBoxes = new Map<string, HTMLInputElement>();
+  const folderBoxes: { box: HTMLInputElement; paths: string[] }[] = [];
+
+  const node = document.createElement('div');
+  node.className = 'icos-freeze-files';
+  const section = createReport();
+  section.addHeading('Files');
+  node.append(section.node);
+
+  if (files.length === 0) {
+    section.addLine('No files found in this directory.');
+  }
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'icos-freeze-files-toolbar';
+  const total = document.createElement('span');
+  const reset = document.createElement('button');
+  reset.type = 'button';
+  reset.className = 'jp-mod-styled icos-freeze-files-reset';
+  reset.textContent = 'Reset to recommended';
+  toolbar.append(total, reset);
+
+  const tree = document.createElement('ul');
+  tree.className = 'icos-freeze-tree';
+  renderFolder(buildTree(files), tree, fileBoxes, folderBoxes);
+
+  const status = document.createElement('div');
+  status.className = 'icos-freeze-report-status';
+  status.setAttribute('role', 'status');
+
+  if (files.length > 0) {
+    node.append(toolbar, tree);
+  }
+  if (snapshot.files_truncated) {
+    const cut = document.createElement('div');
+    cut.className = WARNING_CLASS;
+    cut.textContent =
+      `The listing was cut off at ${files.length} files, ` +
+      'so files past that point are not shown and cannot be packaged.';
+    node.append(cut);
+  }
+  node.append(status);
+
+  function refresh(): void {
+    fileBoxes.forEach((box, path) => {
+      box.checked = selected.has(path);
+    });
+    folderBoxes.forEach(({ box, paths }) => {
+      const count = paths.filter(path => selected.has(path)).length;
+      box.checked = count === paths.length;
+      box.indeterminate = count > 0 && count < paths.length;
+    });
+
+    const size = files
+      .filter(file => selected.has(file.path))
+      .reduce((sum, file) => sum + file.size, 0);
+    total.textContent = `${selected.size} of ${files.length} files selected, ${formatSize(size)}`;
+  }
+
+  function changed(): void {
+    refresh();
+    onChange();
+  }
+
+  fileBoxes.forEach((box, path) => {
+    box.addEventListener('change', () => {
+      if (box.checked) {
+        selected.add(path);
+      } else {
+        selected.delete(path);
+      }
+      changed();
+    });
+  });
+
+  folderBoxes.forEach(({ box, paths }) => {
+    box.addEventListener('change', () => {
+      paths.forEach(path => (box.checked ? selected.add(path) : selected.delete(path)));
+      changed();
+    });
+  });
+
+  reset.addEventListener('click', () => {
+    selected.clear();
+    recommended().forEach(path => selected.add(path));
+    changed();
+  });
+
+  refresh();
+
+  return {
+    node,
+    include: () => [...selected].sort(),
+    saved: () => ({
+      excluded: recommended().filter(path => !selected.has(path)),
+      added: files
+        .filter(file => !file.recommended && selected.has(file.path))
+        .map(file => file.path)
+    }),
+    setStatus: statusWriter(status)
+  };
+}
+
+function buildTree(files: IFreezeFile[]): IFreezeFolder {
+  const root: IFreezeFolder = { name: '', path: '', folders: new Map(), files: [] };
+
+  files.forEach(file => {
+    const parts = file.path.split('/');
+    let folder = root;
+    parts.slice(0, -1).forEach(part => {
+      let child = folder.folders.get(part);
+      if (!child) {
+        const childPath = folder.path === '' ? part : `${folder.path}/${part}`;
+        child = { name: part, path: childPath, folders: new Map(), files: [] };
+        folder.folders.set(part, child);
+      }
+      folder = child;
+    });
+    folder.files.push(file);
+  });
+
+  return root;
+}
+
+function folderFiles(folder: IFreezeFolder): IFreezeFile[] {
+  const nested = [...folder.folders.values()].flatMap(folderFiles);
+  return [...nested, ...folder.files];
+}
+
+function renderFolder(
+  folder: IFreezeFolder,
+  list: HTMLUListElement,
+  fileBoxes: Map<string, HTMLInputElement>,
+  folderBoxes: { box: HTMLInputElement; paths: string[] }[]
+): void {
+  folder.folders.forEach(child => {
+    const contents = folderFiles(child);
+
+    const item = document.createElement('li');
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'icos-freeze-tree-toggle';
+    toggle.setAttribute('aria-label', `Show or hide ${child.name}`);
+    toggle.setAttribute('aria-expanded', 'false');
+
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    folderBoxes.push({ box, paths: contents.map(file => file.path) });
+
+    const children = document.createElement('ul');
+    children.hidden = true;
+    renderFolder(child, children, fileBoxes, folderBoxes);
+
+    toggle.addEventListener('click', () => {
+      children.hidden = !children.hidden;
+      toggle.setAttribute('aria-expanded', String(!children.hidden));
+    });
+
+    const size = contents.reduce((sum, file) => sum + file.size, 0);
+    item.append(treeRow(toggle, box, `${child.name}/`, null, size), children);
+    list.append(item);
+  });
+
+  folder.files.forEach(file => {
+    const item = document.createElement('li');
+
+    const spacer = document.createElement('span');
+    spacer.className = 'icos-freeze-tree-toggle';
+
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    fileBoxes.set(file.path, box);
+
+    const name = file.path.slice(file.path.lastIndexOf('/') + 1);
+    item.append(treeRow(spacer, box, name, KIND_LABELS[file.kind] ?? null, file.size));
+    list.append(item);
+  });
+}
+
+function treeRow(
+  toggle: HTMLElement,
+  box: HTMLInputElement,
+  name: string,
+  kind: string | null,
+  size: number
+): HTMLDivElement {
+  const row = document.createElement('div');
+  row.className = 'icos-freeze-tree-row';
+
+  const label = document.createElement('label');
+  label.className = 'icos-freeze-tree-name';
+  label.append(box, name);
+  row.append(toggle, label);
+
+  if (kind) {
+    const badge = document.createElement('span');
+    badge.className = 'icos-freeze-tree-badge';
+    badge.textContent = kind;
+    row.append(badge);
+  }
+
+  const sizeNode = document.createElement('span');
+  sizeNode.className = 'icos-freeze-tree-size';
+  sizeNode.textContent = formatSize(size);
+  row.append(sizeNode);
+
+  return row;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function renderConflicts(report: IReport, conflicts: IFreezeConflict[]): void {
@@ -445,37 +907,36 @@ function renderDockerfile(
   report: IReport,
   snapshot: IFreezeSnapshot,
   folder: string,
-  conflicts: IFreezeConflict[]
+  conflicts: IFreezeConflict[],
+  preview: { open: boolean }
 ): void {
   report.addHeading('Dockerfile');
 
-  switch (snapshot.dockerfile_written) {
-    case 'written':
-      report.addLine(
-        `The Dockerfile was written into "${folder}". ` +
-          'The folder is hidden, so the file browser does not show it.'
-      );
-      break;
-    case 'unchanged':
-      report.addLine(
-        `The Dockerfile in "${folder}" is already up to date, so nothing was rewritten.`
-      );
-      break;
-    case 'skipped_foreign':
-      report.addWarningLine(
-        `"${folder}" has a Dockerfile that freeze did not generate, which was left alone. ` +
-          'The generated Dockerfile was not saved.'
-      );
-      break;
-    case 'error':
-      report.addWarningLine(
-        `The Dockerfile could not be written into "${folder}". The server log has the reason.`
-      );
-      break;
-    default:
-      // The server leaves dockerfile_written null only when it refused,
-      // and every refusal carries its reason.
-      renderDockerfileBlocked(report, snapshot, conflicts);
+  if (snapshot.bundle_available !== true) {
+    renderDockerfileBlocked(report, snapshot, conflicts);
+    return;
+  }
+
+  report.addLine(
+    'Nothing blocks the freeze. Nothing has been written yet: the Dockerfile and the ' +
+      `selected files go into "${folder}" when the package is downloaded. ` +
+      'The folder is hidden, so the file browser does not show it.'
+  );
+
+  if (snapshot.dockerfile) {
+    const details = document.createElement('details');
+    details.className = 'icos-freeze-dockerfile';
+    details.open = preview.open;
+    details.addEventListener('toggle', () => {
+      preview.open = details.open;
+    });
+
+    const summary = document.createElement('summary');
+    summary.textContent = 'Show the Dockerfile';
+    const code = document.createElement('pre');
+    code.textContent = snapshot.dockerfile;
+    details.append(summary, code);
+    report.append(details);
   }
 }
 
@@ -513,7 +974,10 @@ function renderDockerfileBlocked(
   if (snapshot.dockerfile_blocked) {
     report.addWarningLine(snapshot.dockerfile_blocked);
   }
-  report.addLine('Fix the files in this directory and freeze again to get a Dockerfile.');
+  report.addLine(
+    'Fix the files in this directory and freeze again, or change the selection above, ' +
+      'to get a Dockerfile.'
+  );
 }
 
 function renderRequirementsWarnings(report: IReport, warnings: string[]): void {
@@ -523,101 +987,165 @@ function renderRequirementsWarnings(report: IReport, warnings: string[]): void {
   }
 }
 
-function renderPackage(report: IReport, bundleAvailable: boolean | undefined, path: string): void {
+function createPackageSection(path: string, include: () => string[]): IPackageSection {
+  const report = createReport();
   report.addHeading('Package');
 
-  if (bundleAvailable === true) {
-    report.addLine(
-      'The package holds the Dockerfile, the notebooks, the dependency files and ' +
-        'instructions for a tester.'
-    );
+  const description = document.createElement('div');
+  description.textContent =
+    'The package holds the Dockerfile, the selected files and instructions for a tester.';
 
-    const nameInput = document.createElement('input');
-    nameInput.type = 'text';
-    nameInput.className = 'jp-mod-styled';
-    nameInput.placeholder = 'e.g. co2_station_demo';
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.className = 'jp-mod-styled';
+  nameInput.placeholder = 'e.g. co2_station_demo';
 
-    const nameLabel = document.createElement('label');
-    nameLabel.className = 'icos-freeze-package-name';
-    nameLabel.append('Package name', nameInput);
+  const nameLabel = document.createElement('label');
+  nameLabel.className = 'icos-freeze-package-name';
+  nameLabel.append('Name the package', nameInput);
 
-    const packageButton = document.createElement('button');
-    packageButton.type = 'button';
-    packageButton.className = 'jp-Dialog-button jp-mod-accept jp-mod-styled';
-    packageButton.textContent = 'Download package';
-    packageButton.disabled = true;
+  const packageButton = document.createElement('button');
+  packageButton.type = 'button';
+  packageButton.className = 'jp-Dialog-button jp-mod-accept jp-mod-styled';
+  packageButton.textContent = 'Download package';
 
-    const packageRow = document.createElement('div');
-    packageRow.className = 'icos-freeze-package';
-    packageRow.append(nameLabel, packageButton);
-    report.append(packageRow);
+  const hint = document.createElement('div');
+  hint.className = 'icos-freeze-package-hint';
 
-    const packageStatus = document.createElement('div');
-    packageStatus.className = 'icos-freeze-report-status';
-    packageStatus.setAttribute('role', 'status');
-    report.append(packageStatus);
+  const steps = document.createElement('ol');
+  steps.className = 'icos-freeze-package-steps';
+  const checkStep = document.createElement('li');
+  checkStep.textContent = 'Check the selected files and any problems in this report.';
+  const nameStep = document.createElement('li');
+  nameStep.append(nameLabel);
+  const downloadStep = document.createElement('li');
+  downloadStep.append(packageButton, hint);
+  steps.append(checkStep, nameStep, downloadStep);
 
-    const setPackageStatus = statusWriter(packageStatus);
-    const packageName = (): string => nameInput.value.trim();
+  const packageStatus = document.createElement('div');
+  packageStatus.className = 'icos-freeze-report-status';
+  packageStatus.setAttribute('role', 'status');
 
-    nameInput.addEventListener('input', () => {
-      packageButton.disabled = packageName() === '';
-    });
+  const nextSteps = document.createElement('div');
+  nextSteps.className = 'icos-freeze-next-steps';
+  nextSteps.setAttribute('role', 'status');
+  nextSteps.hidden = true;
 
-    // `finally` brings the controls back however the attempt ended.
-    const startDownload = (): void => {
-      nameInput.disabled = true;
-      packageButton.disabled = true;
-      void downloadBundle(path, packageName(), setPackageStatus).finally(() => {
-        nameInput.disabled = false;
-        packageButton.disabled = packageName() === '';
-      });
-    };
+  report.append(description);
+  report.append(steps);
+  report.append(packageStatus);
+  report.append(nextSteps);
 
-    packageButton.addEventListener('click', startDownload);
+  const setPackageStatus = statusWriter(packageStatus);
+  const setHint = statusWriter(hint);
+  const packageName = (): string => nameInput.value.trim();
 
-    // The Dialog catches Enter in the capture phase on its own node and
-    // closes itself, so the field has to claim the key on the document,
-    // above the Dialog, while it holds focus.
-    const onEnter = (event: KeyboardEvent): void => {
-      if (!nameInput.isConnected) {
-        document.removeEventListener('keydown', onEnter, true);
-        return;
-      }
-      if (event.key !== 'Enter' || event.target !== nameInput) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      if (!packageButton.disabled) {
-        startDownload();
-      }
-    };
-    nameInput.addEventListener('focus', () => {
-      document.addEventListener('keydown', onEnter, true);
-    });
-    nameInput.addEventListener('blur', () => {
-      document.removeEventListener('keydown', onEnter, true);
-    });
-  } else {
-    report.addLine('No package can be made until the Dockerfile problem above is fixed.');
+  let available = false;
+  let blockedReason: string | null = null;
+  let pending = false;
+  let downloading = false;
+
+  // While a re-check is pending the report may not match the ticks, so
+  // the button waits for it rather than package a selection unseen.
+  function refresh(): void {
+    nameInput.disabled = !available || downloading;
+    packageButton.disabled = !available || pending || downloading || packageName() === '';
+
+    if (!available) {
+      const reason = blockedReason ? ` ${blockedReason}` : '';
+      setHint(
+        `The package cannot be made yet.${reason} The Dockerfile section above says what to fix.`,
+        true
+      );
+    } else if (pending) {
+      setHint('Waiting for the report to update.');
+    } else if (packageName() === '' && !downloading) {
+      setHint('Type a name to enable the download.');
+    } else {
+      setHint('');
+    }
   }
+
+  nameInput.addEventListener('input', refresh);
+
+  // `finally` brings the controls back however the attempt ended.
+  const startDownload = (): void => {
+    downloading = true;
+    nextSteps.hidden = true;
+    refresh();
+    void downloadBundle(path, packageName(), include(), setPackageStatus)
+      .then(result => {
+        if (result) {
+          setPackageStatus('');
+          showNextSteps(nextSteps, result, freezeFolder(path));
+        }
+      })
+      .finally(() => {
+        downloading = false;
+        refresh();
+      });
+  };
+
+  packageButton.addEventListener('click', startDownload);
+
+  // The Dialog catches Enter in the capture phase on its own node and
+  // closes itself, so the field has to claim the key on the document,
+  // above the Dialog, while it holds focus.
+  const onEnter = (event: KeyboardEvent): void => {
+    if (!nameInput.isConnected) {
+      document.removeEventListener('keydown', onEnter, true);
+      return;
+    }
+    if (event.key !== 'Enter' || event.target !== nameInput) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (!packageButton.disabled) {
+      startDownload();
+    }
+  };
+  nameInput.addEventListener('focus', () => {
+    document.addEventListener('keydown', onEnter, true);
+  });
+  nameInput.addEventListener('blur', () => {
+    document.removeEventListener('keydown', onEnter, true);
+  });
+
+  refresh();
+
+  return {
+    node: report.node,
+    setAvailable: (value, reason) => {
+      available = value;
+      blockedReason = reason ?? null;
+      refresh();
+    },
+    setPending: value => {
+      pending = value;
+      // A package made before the selection changed no longer matches it.
+      if (value) {
+        nextSteps.hidden = true;
+      }
+      refresh();
+    }
+  };
 }
 
 async function downloadBundle(
   path: string,
   name: string,
+  include: string[],
   setStatus: (text: string, warn?: boolean) => void
-): Promise<void> {
+): Promise<IDownloadedPackage | null> {
   setStatus('Preparing the package.');
 
-  const query = `path=${encodeURIComponent(path)}&name=${encodeURIComponent(name)}`;
-  const bundleUrl = `${PageConfig.getBaseUrl()}icos-ext/bundle?${query}`;
+  const bundleUrl = `${PageConfig.getBaseUrl()}icos-ext/bundle`;
 
-  const response = await freezeRequest(bundleUrl, { method: 'GET' });
+  const response = await freezeRequest(bundleUrl, jsonPost({ path, name, include }));
   if (!response) {
     setStatus(unreachableMessage('package', path), true);
-    return;
+    return null;
   }
 
   // 409: the directory cannot be packaged. 400: the name cleaned to nothing.
@@ -631,17 +1159,17 @@ async function downloadBundle(
         'The server refused to make the package and sent a reason that could not be read.',
         true
       );
-      return;
+      return null;
     }
 
     setStatus(blocked.reason ?? 'The server cannot package this directory.', true);
-    return;
+    return null;
   }
 
   if (!response.ok) {
     logHttpFailure(bundleUrl, response);
     setStatus(httpFailureMessage('package', path, response), true);
-    return;
+    return null;
   }
 
   let blob: Blob;
@@ -650,7 +1178,7 @@ async function downloadBundle(
   } catch (error) {
     console.error(`Freeze: could not read the package sent by ${bundleUrl}`, error);
     setStatus('The package could not be read from the server response.', true);
-    return;
+    return null;
   }
 
   const filename = filenameFrom(response.headers.get('Content-Disposition'));
@@ -668,8 +1196,28 @@ async function downloadBundle(
   // download in Firefox and Safari, so the URL is released in a later one.
   window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
 
-  const savedNote = savedCopy ? ` A copy was also saved into "${freezeFolder(path)}".` : '';
-  setStatus(`Downloaded "${filename}".${savedNote}`);
+  return { filename, saved: savedCopy !== null };
+}
+
+function showNextSteps(node: HTMLElement, result: IDownloadedPackage, folder: string): void {
+  const heading = document.createElement('div');
+  heading.className = 'icos-freeze-next-steps-heading';
+  heading.textContent = 'Next steps';
+
+  const savedNote = result.saved ? ` A copy is also in "${folder}".` : '';
+  const list = document.createElement('ul');
+  [
+    `"${result.filename}" was downloaded.${savedNote}`,
+    'Give the zip to the tester.',
+    'The README.md inside the zip explains how to build and run it.'
+  ].forEach(text => {
+    const item = document.createElement('li');
+    item.textContent = text;
+    list.append(item);
+  });
+
+  node.replaceChildren(heading, list);
+  node.hidden = false;
 }
 
 function statusWriter(node: HTMLElement): (text: string, warn?: boolean) => void {
@@ -692,8 +1240,28 @@ function renderMissing(report: IReport, missing: string[]): void {
     report.addHeading(`Not installed (${missing.length})`, true);
     report.addList(missing, true);
     report.addLine(
-      'These packages are imported by the notebooks but are not installed in this environment, ' +
+      'These packages are imported by the selected notebooks but are not installed in this environment, ' +
         'so the build cannot reproduce them.'
+    );
+  }
+}
+
+function renderLocalModules(report: IReport, modules: string[]): void {
+  if (modules.length > 0) {
+    report.addHeading('Local code, copied with the notebooks');
+    report.addList(modules);
+  }
+}
+
+function renderUnreadable(report: IReport, notebooks: IFreezeUnreadable[]): void {
+  if (notebooks.length > 0) {
+    report.addHeading(`Notebooks not checked (${notebooks.length})`, true);
+    report.addList(
+      notebooks.map(notebook => `${notebook.path}: ${notebook.reason}`),
+      true
+    );
+    report.addLine(
+      'These notebooks are copied into the package, but their imports were not checked.'
     );
   }
 }

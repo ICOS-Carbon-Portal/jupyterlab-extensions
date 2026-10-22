@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import platform
+import posixpath
 import re
 import shutil
 import sys
@@ -89,9 +90,36 @@ FREEZE_DIR_NAME = ".icos-freeze"
 DOCKERIGNORE_NAME = ".dockerignore"
 MANIFEST_NAME = "icos-freeze.json"
 
+# What a staged FREEZE_DIR_NAME holds besides the user's files. Clearing
+# out an earlier selection leaves these, and every "*.zip", in place.
+GENERATED_IN_CONTEXT = frozenset({DOCKERFILE_NAME, DOCKERIGNORE_NAME, MANIFEST_NAME})
+
+# Folders and files the listing never offers for a freeze, at any depth.
+UNLISTED_DIR_NAMES = frozenset({
+    FREEZE_DIR_NAME,
+    ".ipynb_checkpoints",
+    "__pycache__",
+    ".git",
+    ".virtual_documents",
+})
+UNLISTED_FILE_NAMES = frozenset({".DS_Store"})
+UNLISTED_SUFFIXES = (".zip", ".pyc")
+
+# The names the package writes its own files under, so a user file of
+# the same name at the top of the directory is never listed.
+UNLISTED_TOP_LEVEL_NAMES = frozenset({
+    DOCKERFILE_NAME,
+    DOCKERIGNORE_NAME,
+    "docker-compose.yml",
+    MANIFEST_NAME,
+    "README.md",
+})
+
+MAX_LISTED_FILES = 5000
+
 # The build context is FREEZE_DIR_NAME, or the tester's unpacked
 # package, and everything not listed here is copied into the image.
-# Both hold only the copied notebooks and dependency files, the
+# Both hold only the copied files the user selected, the
 # generated files and, in FREEZE_DIR_NAME, the saved packages.
 #
 # The first two are what JupyterLab and the macOS Finder leave in a
@@ -108,9 +136,12 @@ MANIFEST_NAME = "icos-freeze.json"
 # The manifest and the README are the tester's, not the container's:
 # the image holds the work, while the package holds the instructions
 # and the record of what was frozen.
+#
+# docker build matches every entry from the root of the context, so the
+# first two need "**/" to reach the subfolders a freeze now copies.
 DOCKERIGNORE_ENTRIES = (
-    ".ipynb_checkpoints/",
-    ".DS_Store",
+    "**/.ipynb_checkpoints/",
+    "**/.DS_Store",
     "*.zip",
     "Dockerfile",
     ".dockerignore",
@@ -130,6 +161,9 @@ BUNDLE_COMPOSE_NAME = "docker-compose.yml"
 # frozen copy has to land somewhere else — otherwise the container
 # cannot bind. The container side stays 8888.
 BUNDLE_COMPOSE_PORT = 8899
+
+# The README names this many files of each kind; the manifest has them all.
+README_MAX_PATHS = 20
 
 # Everything a package name may not contain. Runs of it collapse to a
 # single underscore, so whatever the user types arrives as snake case,
@@ -195,8 +229,10 @@ IMAGE_BUILD_GAP_SECONDS = 60 * 60
 # still counted as part of the image.
 IMAGE_BUILD_TOLERANCE_SECONDS = 5 * 60
 
-# Never read more than this from a single dependency file or notebook.
+# Never read more than this from a single dependency file. Notebooks
+# carry their outputs, so they get a cap of their own.
 MAX_FILE_BYTES = 1024 * 1024
+MAX_NOTEBOOK_BYTES = 100 * 1024 * 1024
 
 # Install magics we understand, e.g. "%pip install -q pandas==1.2.3" or
 # "!pip install numpy". The reported source is "pip" or "conda".
@@ -308,58 +344,85 @@ def _read_capped_text(file_path):
     return raw.decode("utf-8", errors="replace")
 
 
-def _safe_files(directory, root, matches):
-    """Return files directly in *directory* whose name passes *matches*.
+def _is_listed_name(name, top_level):
+    """Return True when a file called *name* may appear in the listing."""
+    if name in UNLISTED_FILE_NAMES or name.endswith(UNLISTED_SUFFIXES):
+        return False
+    return not (top_level and name in UNLISTED_TOP_LEVEL_NAMES)
 
-    The listing is not recursive and is sorted by name. Entries that are
-    not regular files, or whose symlink target lies outside *root*, are
-    skipped.
+
+def _is_hidden(path):
+    """Return True when any part of the relative *path* starts with a dot."""
+    return any(part.startswith(".") for part in path.split("/"))
+
+
+def _list_files(directory, root):
+    """Return (files, truncated) for every file the user may freeze.
+
+    *files* maps each POSIX path relative to *directory* to {"path",
+    "size", "source"}, where "source" is the file on disk. Symlinked
+    folders are not followed, and a symlinked file whose target lies
+    outside *root* is skipped. *truncated* is True once MAX_LISTED_FILES
+    is reached; the walk stops there.
     """
-    try:
-        with os.scandir(directory) as entries:
-            candidates = sorted(
-                (entry for entry in entries if matches(entry.name)),
-                key=lambda entry: entry.name,
-            )
-    except OSError as e:
-        log.warning("Freeze: cannot list directory: %s", e)
-        return []
-
-    found = []
-    for entry in candidates:
-        file_path = Path(entry.path)
+    files = {}
+    pending = [(directory, "")]
+    while pending:
+        folder, prefix = pending.pop()
         try:
-            # Follows symlinks: broken links, directories and other
-            # non-regular files all fall out here.
-            if not file_path.is_file():
-                continue
-            target = file_path.resolve()
+            with os.scandir(folder) as entries:
+                ordered = sorted(entries, key=lambda entry: entry.name)
         except OSError as e:
-            log.warning("Freeze: cannot stat %s: %s", entry.name, e)
+            log.warning("Freeze: cannot list %s: %s", prefix or "/", e)
             continue
 
-        try:
-            target.relative_to(root)
-        except ValueError:
-            log.warning(
-                "Freeze: skipping %s, it links outside the root",
-                entry.name,
-            )
-            continue
+        subfolders = []
+        for entry in ordered:
+            rel = prefix + entry.name
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name not in UNLISTED_DIR_NAMES:
+                        subfolders.append((Path(entry.path), rel + "/"))
+                    continue
+                if not _is_listed_name(entry.name, not prefix):
+                    continue
+                file_path = Path(entry.path)
+                # Follows symlinks: broken links, linked folders and
+                # other non-regular files all fall out here.
+                if not file_path.is_file():
+                    continue
+                target = file_path.resolve()
+                size = file_path.stat().st_size
+            except OSError as e:
+                log.warning("Freeze: cannot stat %s: %s", rel, e)
+                continue
 
-        found.append(file_path)
+            try:
+                target.relative_to(root)
+            except ValueError:
+                log.warning("Freeze: skipping %s, it links outside the root", rel)
+                continue
 
-    return found
+            if len(files) >= MAX_LISTED_FILES:
+                log.warning("Freeze: listing stopped at %d files", MAX_LISTED_FILES)
+                return files, True
+            files[rel] = {"path": rel, "size": size, "source": file_path}
+
+        pending.extend(reversed(subfolders))
+
+    return files, False
 
 
-def _collect_requirements(directory, root):
-    """Return dependency files directly in *directory*, sorted by name."""
+def _collect_requirements(paths, sources):
+    """Return the top-level dependency files among *paths*, sorted by name."""
     found = []
-    for file_path in _safe_files(directory, root, _is_requirement_file):
-        content = _read_capped_text(file_path)
+    for path in sorted(paths):
+        if "/" in path or not _is_requirement_file(path):
+            continue
+        content = _read_capped_text(sources[path])
         if content is None:
             continue
-        found.append({"name": file_path.name, "content": content})
+        found.append({"name": path, "content": content})
     return found
 
 
@@ -464,25 +527,34 @@ def _code_cell_lines(cell):
 
 
 def _notebook_packages(file_path):
-    """Return the packages named in *file_path*, or None if unreadable.
+    """Return (packages, None) for *file_path*, or (None, reason).
 
-    Packages keep the spelling used in the notebook and the order they
-    are first seen in. A pinned install replaces an earlier versionless
-    mention of the same package, keeping that first position.
+    *reason* is "too large", "not valid JSON" or "cannot read", as the
+    frontend shows it. Packages keep the spelling used in the notebook
+    and the order they are first seen in. A pinned install replaces an
+    earlier versionless mention of the same package, keeping that first
+    position.
     """
-    text = _read_capped_text(file_path)
-    if text is None:
-        return None
+    try:
+        with open(file_path, "rb") as handle:
+            raw = handle.read(MAX_NOTEBOOK_BYTES + 1)
+    except OSError as e:
+        log.warning("Freeze: cannot read %s: %s", file_path.name, e)
+        return None, "cannot read"
+
+    if len(raw) > MAX_NOTEBOOK_BYTES:
+        log.warning("Freeze: %s is over %d bytes", file_path.name, MAX_NOTEBOOK_BYTES)
+        return None, "too large"
 
     try:
-        document = json.loads(text)
+        document = json.loads(raw.decode("utf-8", errors="replace"))
     except ValueError as e:
         log.warning("Freeze: cannot parse %s: %s", file_path.name, e)
-        return None
+        return None, "not valid JSON"
 
     if not isinstance(document, dict) or not isinstance(document.get("cells"), list):
-        log.warning("Freeze: %s is not a notebook, skipping", file_path.name)
-        return None
+        log.warning("Freeze: %s is not a notebook", file_path.name)
+        return None, "not valid JSON"
 
     packages = {}
     for cell in document["cells"]:
@@ -496,18 +568,127 @@ def _notebook_packages(file_path):
                 elif known["version"] is None and package["version"]:
                     known.update(package)
 
-    return list(packages.values())
+    return list(packages.values()), None
 
 
-def _collect_notebooks(directory, root):
-    """Return the packages of every notebook directly in *directory*."""
-    notebooks = []
-    for file_path in _safe_files(directory, root, _is_notebook_file):
-        packages = _notebook_packages(file_path)
-        if packages is None:
+def _module_index(paths):
+    """Return {(folder, import name): [paths]} for the ".py" files in *paths*.
+
+    "scripts/sub/helper.py" is filed under ("", "scripts"),
+    ("scripts", "sub") and ("scripts/sub", "helper"), so one lookup
+    answers whether an import from a given folder lands on local code.
+    """
+    index = {}
+    for path in sorted(paths):
+        if not path.endswith(".py"):
             continue
-        notebooks.append({"name": file_path.name, "packages": packages})
-    return notebooks
+        parts = path.split("/")
+        for depth, head in enumerate(parts):
+            if depth == len(parts) - 1:
+                head = head[: -len(".py")]
+            index.setdefault(("/".join(parts[:depth]), head), []).append(path)
+    return index
+
+
+def _local_imports(notebook_path, packages, index):
+    """Return {import name: [paths]} for the imports *index* resolves locally.
+
+    An import is local when its root is a ".py" file or a folder of them
+    beside the notebook, which is where the kernel starts, or at the top
+    of the frozen directory. Installs are never local.
+    """
+    folder = posixpath.dirname(notebook_path)
+    found = {}
+    for package in packages:
+        if package["source"] != "import":
+            continue
+        name = package["name"]
+        paths = list(index.get((folder, name), []))
+        if folder:
+            paths.extend(index.get(("", name), []))
+        if paths:
+            found[name] = paths
+    return found
+
+
+def _read_notebooks(paths, sources, cache):
+    """Return {path: (packages, reason)} for *paths*, reading each once.
+
+    *cache* holds what earlier calls in the same request already read.
+    """
+    for path in paths:
+        if path not in cache:
+            cache[path] = _notebook_packages(sources[path])
+    return {path: cache[path] for path in paths}
+
+
+def _collect_notebooks(paths, sources, cache):
+    """Return (notebooks, unreadable, local_modules) for the selected *paths*.
+
+    Only the notebooks among *paths* are read, and only the ".py" files
+    among them count as local code, so unticking a local folder puts its
+    import back among the packages. Local imports are left out of each
+    notebook's packages, since no package provides them.
+    """
+    index = _module_index(paths)
+    notebook_paths = sorted(path for path in paths if _is_notebook_file(path))
+
+    notebooks = []
+    unreadable = []
+    local_modules = set()
+    for path, (packages, reason) in _read_notebooks(
+        notebook_paths, sources, cache
+    ).items():
+        if packages is None:
+            unreadable.append({"path": path, "reason": reason})
+            continue
+        local = _local_imports(path, packages, index)
+        local_modules.update(local)
+        notebooks.append({
+            "name": path,
+            "packages": [
+                package
+                for package in packages
+                if package["source"] != "import" or package["name"] not in local
+            ],
+        })
+
+    return notebooks, unreadable, sorted(local_modules)
+
+
+def _describe_files(files, sources, cache):
+    """Return the listing entries with "kind" and "recommended", by path.
+
+    Every file is recommended unless it is hidden. "kind" names what a
+    file is for: a notebook, a top-level dependency file, local code
+    that a non-hidden notebook imports, or anything else.
+    """
+    notebooks = [
+        path for path in files if _is_notebook_file(path) and not _is_hidden(path)
+    ]
+    index = _module_index(files)
+    local_code = set()
+    for path, (packages, _) in _read_notebooks(notebooks, sources, cache).items():
+        for paths in _local_imports(path, packages or [], index).values():
+            local_code.update(paths)
+
+    described = []
+    for path in sorted(files):
+        if _is_notebook_file(path):
+            kind = "notebook"
+        elif "/" not in path and _is_requirement_file(path):
+            kind = "requirements"
+        elif path in local_code:
+            kind = "local_code"
+        else:
+            kind = "other"
+        described.append({
+            "path": path,
+            "size": files[path]["size"],
+            "kind": kind,
+            "recommended": not _is_hidden(path),
+        })
+    return described
 
 
 def _parse_requirement_pins(content):
@@ -1506,10 +1687,10 @@ def _generate_dockerfile(
 
     lines.extend([
         "",
-        "# The build context holds copies of the notebooks and their"
-        " dependency files,",
-        "# so they are baked into the image instead of having to be"
-        " mounted beside it.",
+        "# The build context holds copies of the files chosen for the"
+        " freeze, so they",
+        "# are baked into the image instead of having to be mounted"
+        " beside it.",
         "# 1000:100 is NB_UID:NB_GID in the base image, so the copied"
         " files belong to",
         "# jovyan.",
@@ -1639,9 +1820,9 @@ def _manifest_document(image, snapshot):
     """Return the freeze manifest for *snapshot*, ready to serialise.
 
     It records what the directory was frozen from — the base image, the
-    Python version, how provenance was decided, and the files and
-    packages involved — so a rebuilt image can be traced back without
-    anyone having to read the Dockerfile and guess.
+    Python version, how provenance was decided, every file chosen for
+    the package and the packages involved — so a rebuilt image can be
+    traced back without anyone having to read the Dockerfile and guess.
 
     "pid" is a placeholder for a future persistent identifier: the
     handle that will be minted for a frozen environment so it can be
@@ -1659,8 +1840,11 @@ def _manifest_document(image, snapshot):
         "image": image,
         "python_version": snapshot["python_version"],
         "provenance_method": snapshot["provenance_method"],
+        "files": list(snapshot["include"]),
         "notebooks": [item["name"] for item in snapshot["notebooks"]],
+        "unreadable_notebooks": list(snapshot["unreadable_notebooks"]),
         "requirements": [item["name"] for item in snapshot["requirements"]],
+        "local_modules": list(snapshot["local_modules"]),
         "user_installed": [
             {
                 "name": entry["name"],
@@ -1692,16 +1876,70 @@ def _write_manifest(directory, document):
     return "written"
 
 
-def _stage_build_context(directory, snapshot):
-    """Copy the snapshot's files into FREEZE_DIR_NAME; return the folder.
+def _is_kept_in_context(path):
+    """Return True when clearing FREEZE_DIR_NAME must leave *path* alone."""
+    return path.endswith(".zip") or path in GENERATED_IN_CONTEXT
 
-    Returns None when the folder cannot be created. Copies of notebooks
-    and dependency files that are no longer in the snapshot are removed,
-    because the Dockerfile copies the whole folder into the image and a
-    stale notebook would ship with it. Nothing else there is touched:
-    saved packages stay, and the generated files are rewritten by their
-    own writers. A file that cannot be copied is left out, and the
-    package README names only what is in the folder.
+
+def _remove_stale(context, selected):
+    """Remove what *context* holds outside *selected* and the kept files.
+
+    The Dockerfile copies the whole folder into the image, so a file
+    left over from an earlier selection would ship with it. Symlinks are
+    removed as links and never followed; folders left empty go too.
+    """
+    pending = [(context, "")]
+    folders = []
+    while pending:
+        folder, prefix = pending.pop()
+        try:
+            with os.scandir(folder) as entries:
+                found = list(entries)
+        except OSError as e:
+            log.warning("Freeze: cannot list %s: %s", folder.name, e)
+            continue
+
+        for entry in found:
+            rel = prefix + entry.name
+            if entry.is_dir(follow_symlinks=False):
+                folders.append(Path(entry.path))
+                pending.append((Path(entry.path), rel + "/"))
+                continue
+            if rel in selected or _is_kept_in_context(rel):
+                continue
+            try:
+                os.unlink(entry.path)
+            except OSError as e:
+                log.warning("Freeze: cannot remove the stale %s: %s", rel, e)
+
+    # A folder is always listed before the ones inside it.
+    for folder in reversed(folders):
+        try:
+            folder.rmdir()
+        except OSError:
+            # Not empty: it still holds a kept or selected file.
+            continue
+
+
+def _has_symlinked_parent(context, parts):
+    """Return True when a folder on the way to *parts* is a symlink."""
+    current = context
+    for part in parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _stage_build_context(directory, snapshot):
+    """Copy the selected files into FREEZE_DIR_NAME; return the folder.
+
+    Returns None when the folder cannot be created. Files keep their
+    path relative to *directory*. Anything an earlier selection left
+    there is removed first, see _remove_stale; saved packages stay, and
+    the generated files are rewritten by their own writers. A file that
+    cannot be copied is left out, and the package README names only
+    what is in the folder.
     """
     context = directory / FREEZE_DIR_NAME
     try:
@@ -1714,42 +1952,23 @@ def _stage_build_context(directory, snapshot):
         log.warning("Freeze: cannot create %s: %s", FREEZE_DIR_NAME, e)
         return None
 
-    staged = {
-        item["name"] for item in snapshot["notebooks"] + snapshot["requirements"]
-    }
+    selected = set(snapshot["include"])
+    _remove_stale(context, selected)
 
-    try:
-        with os.scandir(context) as entries:
-            stale = [
-                Path(entry.path)
-                for entry in entries
-                if entry.name not in staged
-                and (
-                    _is_notebook_file(entry.name)
-                    or _is_requirement_file(entry.name)
-                )
-                and not entry.is_dir(follow_symlinks=False)
-            ]
-    except OSError as e:
-        log.warning("Freeze: cannot list %s: %s", FREEZE_DIR_NAME, e)
-        stale = []
-    for file_path in stale:
+    for path in sorted(selected):
+        parts = path.split("/")
+        target = context.joinpath(*parts)
         try:
-            file_path.unlink()
-        except OSError as e:
-            log.warning(
-                "Freeze: cannot remove the stale %s: %s", file_path.name, e
-            )
-
-    for name in sorted(staged):
-        target = context / name
-        try:
+            if _has_symlinked_parent(context, parts):
+                log.warning("Freeze: not copying %s through a symlink", path)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
             # Unlinked first so a symlink in the folder is replaced, not
             # written through.
             target.unlink(missing_ok=True)
-            shutil.copyfile(directory / name, target)
+            shutil.copyfile(snapshot["sources"][path], target)
         except OSError as e:
-            log.warning("Freeze: cannot copy %s: %s", name, e)
+            log.warning("Freeze: cannot copy %s: %s", path, e)
 
     return context
 
@@ -1801,25 +2020,22 @@ def _bundle_member_bytes(file_path):
         return None
 
 
-def _bundle_files(directory, items):
-    """Return [(name, bytes)] for the freeze *items* that can be read.
+def _bundle_files(directory, paths):
+    """Return [(path, bytes)] for the selected *paths* that can be read.
 
-    *items* are the snapshot's notebook or dependency-file records, and
-    *directory* is the staged FREEZE_DIR_NAME. A ".zip" is never taken
-    along: the folder also holds the packages earlier freezes left in
-    it, and a package inside a package is only weight.
+    *paths* are relative POSIX paths, and *directory* is the staged
+    FREEZE_DIR_NAME. A ".zip" is never taken along: the folder also
+    holds the packages earlier freezes left in it, and a package inside
+    a package is only weight.
     """
     found = []
-    for item in items or []:
-        if not isinstance(item, dict):
+    for path in paths:
+        if path.endswith(".zip"):
             continue
-        name = item.get("name")
-        if not isinstance(name, str) or not name or name.endswith(".zip"):
-            continue
-        data = _bundle_member_bytes(directory / name)
+        data = _bundle_member_bytes(directory.joinpath(*path.split("/")))
         if data is None:
             continue
-        found.append((name, data))
+        found.append((path, data))
     return found
 
 
@@ -1880,31 +2096,58 @@ def _generate_compose(tag):
     ]) + "\n"
 
 
-def _generate_bundle_readme(
-    directory,
-    tag,
-    manifest,
-    notebooks,
-    requirements,
-    missing,
-):
+def _readme_paths(paths):
+    """Return *paths* quoted for the README, naming at most README_MAX_PATHS."""
+    named = [f"`{path}`" for path in paths[:README_MAX_PATHS]]
+    rest = len(paths) - len(named)
+    if rest:
+        named.append(f"and {rest} more, listed in `{MANIFEST_NAME}`")
+    return ", ".join(named) if named else "none"
+
+
+def _generate_bundle_readme(directory, tag, manifest, members, snapshot):
     """Return the README shipped in the handover package.
 
     It is addressed to someone who has Docker and this zip and nothing
     else: no checkout, no access to the server the directory was frozen
     on, and no reason to read the Dockerfile first. Every command is
     written out with the real tag, so it can be pasted as it stands.
+
+    *members* are the selected files that made it into the package,
+    which is all the README names.
     """
     name = directory.name or "/"
     image = manifest.get("image") or "unknown"
     frozen_at = manifest.get("frozen_at") or "unknown"
 
+    kinds = {entry["path"]: entry["kind"] for entry in snapshot["files"]}
+    grouped = {"notebook": [], "requirements": [], "local_code": [], "other": []}
+    for path in members:
+        grouped[kinds.get(path, "other")].append(path)
+
+    contents = [
+        f"- `{DOCKERFILE_NAME}`, `{DOCKERIGNORE_NAME}`: the build context",
+        f"- `{BUNDLE_COMPOSE_NAME}`: brings the environment up with one"
+        " command",
+        f"- `{MANIFEST_NAME}`: what was frozen, and from which image",
+        f"- Notebooks: {_readme_paths(grouped['notebook'])}",
+        f"- Dependency files: {_readme_paths(grouped['requirements'])}",
+    ]
+    if grouped["local_code"]:
+        modules = ", ".join(f"`{item}`" for item in snapshot["local_modules"])
+        contents.append(
+            f"- Local code the notebooks import ({modules or 'none'}):"
+            f" {_readme_paths(grouped['local_code'])}"
+        )
+    if grouped["other"]:
+        contents.append(f"- Other files: {_readme_paths(grouped['other'])}")
+
     lines = [
         f"# Frozen environment: {name}",
         "",
-        "This package holds the notebooks that were in the JupyterLab"
-        f" directory `{name}`, their dependency files, and a Dockerfile"
-        " that rebuilds the environment they ran in.",
+        "This package holds the files chosen from the JupyterLab"
+        f" directory `{name}`, with their folders kept as they were, and a"
+        " Dockerfile that rebuilds the environment the notebooks ran in.",
         "",
         f"- Frozen at: {frozen_at}",
         f"- Base image: {image}",
@@ -1964,17 +2207,32 @@ def _generate_bundle_readme(
         "",
         "## What is in this package",
         "",
-        f"- `{DOCKERFILE_NAME}`, `{DOCKERIGNORE_NAME}`: the build context",
-        f"- `{BUNDLE_COMPOSE_NAME}`: brings the environment up with one"
-        " command",
-        f"- `{MANIFEST_NAME}`: what was frozen, and from which image",
-        f"- Notebooks: {', '.join(notebooks) if notebooks else 'none'}",
-        "- Dependency files:"
-        f" {', '.join(requirements) if requirements else 'none'}",
     ]
+    lines.extend(contents)
+
+    unchecked = [
+        entry
+        for entry in snapshot["unreadable_notebooks"]
+        if entry["path"] in members
+    ]
+    if unchecked:
+        lines.extend([
+            "",
+            "## Notebooks that were not checked",
+            "",
+            "These are in the package, but their imports could not be read"
+            " when the directory was frozen, so a package they need may be"
+            " missing from the image:",
+            "",
+        ])
+        lines.extend(f"- `{entry['path']}`: {entry['reason']}" for entry in unchecked)
 
     names = sorted(
-        {item for item in (missing or []) if isinstance(item, str) and item},
+        {
+            item
+            for item in (snapshot["missing"] or [])
+            if isinstance(item, str) and item
+        },
         key=_normalise_name,
     )
     if names:
@@ -2009,12 +2267,12 @@ def _generate_bundle_readme(
 def _bundle_archive(directory, snapshot, image, package):
     """Return (filename, bytes) for the handover package of *directory*.
 
-    A flat zip: the build context that was just staged in
-    FREEZE_DIR_NAME, with the copies of the notebooks and dependency
-    files it describes, plus a README for whoever has to build it and a
-    compose file that does the build and the run in one command. Flat
-    because the tester unpacks it and builds in the unpacked directory
-    — a directory prefix would only be one more thing to get wrong.
+    The build context that was just staged in FREEZE_DIR_NAME, with the
+    selected files at their relative paths, plus a README for whoever
+    has to build it and a compose file that does the build and the run
+    in one command. No folder wraps the whole, because the tester
+    unpacks it and builds in the unpacked directory — a directory prefix
+    would only be one more thing to get wrong.
 
     Everything but the README and compose file is read back from the
     folder rather than generated a second time, so the package and the
@@ -2035,8 +2293,7 @@ def _bundle_archive(directory, snapshot, image, package):
             manifest_data = data
         context.append((name, data))
 
-    notebooks = _bundle_files(staged, snapshot["notebooks"])
-    requirements = _bundle_files(staged, snapshot["requirements"])
+    members = _bundle_files(staged, snapshot["include"])
 
     manifest = _bundle_manifest(manifest_data)
     if not manifest.get("image"):
@@ -2047,15 +2304,14 @@ def _bundle_archive(directory, snapshot, image, package):
         directory,
         tag,
         manifest,
-        [name for name, _ in notebooks],
-        [name for name, _ in requirements],
-        snapshot["missing"],
+        [path for path, _ in members],
+        snapshot,
     )
     compose = _generate_compose(tag)
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, data in context + notebooks + requirements:
+        for name, data in context + members:
             archive.writestr(name, data)
         archive.writestr(BUNDLE_README_NAME, readme)
         archive.writestr(BUNDLE_COMPOSE_NAME, compose)
@@ -2080,16 +2336,52 @@ def _write_bundle(directory, name, data):
     return True
 
 
-def _freeze_snapshot(handler, path):
-    """Return the freeze snapshot for *path*.
+def _freeze_request(handler):
+    """Return (path, include, exclude, name) from a freeze request's body.
 
-    The keys are "directory", "requirements", "notebooks", "conflicts",
-    "notebook_installs", "environment", "user_installed", "missing",
-    "contract", "python_version" and "provenance_method". It is a
-    mapping rather than a tuple because "environment" and
-    "user_installed" are both
-    lists of package records, and positional unpacking is one edit away
-    from silently swapping them.
+    *include* and *exclude* are each None or a list of strings, and
+    nothing more is checked here: _freeze_snapshot only keeps the paths
+    the listing has. A body
+    of any other shape is a 400; get_json_body already answers one for a
+    body that is not JSON at all.
+    """
+    body = handler.get_json_body()
+    if not isinstance(body, dict):
+        raise web.HTTPError(400, "The request body must be a JSON object")
+
+    path = body.get("path", "")
+    include = body.get("include")
+    exclude = body.get("exclude")
+    name = body.get("name", "")
+    if not isinstance(path, str) or not isinstance(name, str):
+        raise web.HTTPError(400, '"path" and "name" must be strings')
+    for key, value in (("include", include), ("exclude", exclude)):
+        if value is not None and (
+            not isinstance(value, list)
+            or not all(isinstance(item, str) for item in value)
+        ):
+            raise web.HTTPError(400, f'"{key}" must be null or a list of paths')
+
+    return path, include, exclude, name
+
+
+def _freeze_snapshot(handler, path, include, exclude=None):
+    """Return the freeze snapshot for *path*, analysing the selected files.
+
+    *include* is the relative paths the user ticked, or None for the
+    recommended selection minus the paths in *exclude*; *exclude* is
+    ignored when *include* is a list. Paths the listing does not have
+    are dropped, so nothing outside the directory can be named into it.
+
+    The keys are "directory", "files", "files_truncated", "include",
+    "sources", "requirements", "notebooks", "unreadable_notebooks",
+    "local_modules", "conflicts", "notebook_installs", "environment",
+    "user_installed", "missing", "contract", "python_version" and
+    "provenance_method". "sources" maps each listed path to the file on
+    disk and stays on the server. It is a mapping rather than a tuple
+    because "environment" and "user_installed" are both lists of package
+    records, and positional unpacking is one edit away from silently
+    swapping them.
 
     Both freeze endpoints collect the snapshot this way, so they answer
     the same 400 and 404, never differ on what a directory contains, and
@@ -2107,8 +2399,24 @@ def _freeze_snapshot(handler, path):
         log.warning("Freeze: directory not found: %r", path)
         raise web.HTTPError(404, "Directory not found")
 
-    requirements = _collect_requirements(directory, root)
-    notebooks = _collect_notebooks(directory, root)
+    listing, truncated = _list_files(directory, root)
+    sources = {rel: entry["source"] for rel, entry in listing.items()}
+    cache = {}
+    files = _describe_files(listing, sources, cache)
+    if include is None:
+        dropped = set(exclude or ())
+        selected = [
+            entry["path"]
+            for entry in files
+            if entry["recommended"] and entry["path"] not in dropped
+        ]
+    else:
+        selected = sorted(set(include) & listing.keys())
+
+    requirements = _collect_requirements(selected, sources)
+    notebooks, unreadable, local_modules = _collect_notebooks(
+        selected, sources, cache
+    )
     conflicts = _find_conflicts(notebooks, requirements)
     installs = _notebook_installs(notebooks)
 
@@ -2118,8 +2426,14 @@ def _freeze_snapshot(handler, path):
 
     return {
         "directory": directory,
+        "files": files,
+        "files_truncated": truncated,
+        "include": selected,
+        "sources": sources,
         "requirements": requirements,
         "notebooks": notebooks,
+        "unreadable_notebooks": unreadable,
+        "local_modules": local_modules,
         "conflicts": conflicts,
         "notebook_installs": installs,
         "environment": environment,
@@ -2161,9 +2475,9 @@ class FreezeHandler(APIHandler):
     """Snapshot of the session image plus a directory's dependency files."""
 
     @web.authenticated
-    def get(self):
-        path = self.get_query_argument("path", default="")
-        snapshot = _freeze_snapshot(self, path)
+    def post(self):
+        path, include, exclude, _ = _freeze_request(self)
+        snapshot = _freeze_snapshot(self, path, include, exclude)
 
         image = _session_image()
         blocked = _dockerfile_block_reason(
@@ -2173,9 +2487,6 @@ class FreezeHandler(APIHandler):
             snapshot["contract"],
         )
         dockerfile = None
-        written = None
-        dockerignore_written = None
-        manifest_written = None
         if blocked is None:
             dockerfile = _generate_dockerfile(
                 path,
@@ -2186,17 +2497,6 @@ class FreezeHandler(APIHandler):
                 snapshot["python_version"],
                 snapshot["provenance_method"],
             )
-            # A GET that writes to disk is not ideal, but freezing has to
-            # leave the build context in FREEZE_DIR_NAME without a second
-            # click. The writes are idempotent: generated content that
-            # already matches is left untouched, and a hand-written
-            # Dockerfile or .dockerignore there is never replaced.
-            context = _write_build_context(
-                snapshot["directory"], dockerfile, image, snapshot
-            )
-            written = context["dockerfile"]
-            dockerignore_written = context["dockerignore"]
-            manifest_written = context["manifest"]
 
         self.finish(json.dumps({
             "path": path,
@@ -2211,6 +2511,11 @@ class FreezeHandler(APIHandler):
                 {"name": item["name"]} for item in snapshot["requirements"]
             ],
             "notebooks": snapshot["notebooks"],
+            "unreadable_notebooks": snapshot["unreadable_notebooks"],
+            "local_modules": snapshot["local_modules"],
+            "files": snapshot["files"],
+            "files_truncated": snapshot["files_truncated"],
+            "include": snapshot["include"],
             "environment": snapshot["environment"],
             "user_installed": snapshot["user_installed"],
             "missing": snapshot["missing"],
@@ -2219,34 +2524,28 @@ class FreezeHandler(APIHandler):
             "requirements_warnings": snapshot["contract"]["warnings"],
             "dockerfile": dockerfile,
             "dockerfile_blocked": blocked,
-            "dockerfile_written": written,
-            "dockerignore_written": dockerignore_written,
-            "manifest_written": manifest_written,
-            # Whether the frontend may offer the handover package.
-            # True only when a generated Dockerfile is actually on
-            # disk: the package is built around that file, and a
-            # Dockerfile that was generated but never written is no
-            # use to whoever has to build it. The bundle endpoint
-            # refuses on the same two checks.
-            "bundle_available": written in DOCKERFILE_ON_DISK,
+            # Nothing is written until the bundle request, which can
+            # still refuse when FREEZE_DIR_NAME holds a Dockerfile that
+            # ICOS Freeze did not write.
+            "bundle_available": blocked is None,
         }))
 
 
 class BundleHandler(APIHandler):
     """Serves a frozen directory as a zip someone else can build and run.
 
-    The freeze leaves a build context in FREEZE_DIR_NAME, which is
+    It first stages the build context in FREEZE_DIR_NAME, which is
     enough for whoever is already sitting in front of that directory. A
     tester is not: they get this package and nothing else, so it carries
-    the notebooks, their dependency files, the build context and a
-    README with the real commands in it.
+    the selected files, the build context and a README with the real
+    commands in it.
 
     A copy is saved in FREEZE_DIR_NAME as well, so the same package
     can be handed on again later without freezing a second time.
     """
 
     def finish(self, *args, **kwargs):
-        """Finish the response, keeping the Content-Type set in get().
+        """Finish the response, keeping the Content-Type set in post().
 
         APIHandler.finish sets "Content-Type: application/json" on every
         response it completes. Newer jupyter_server versions take a
@@ -2258,9 +2557,9 @@ class BundleHandler(APIHandler):
         return super(APIHandler, self).finish(*args, **kwargs)
 
     @web.authenticated
-    def get(self):
-        path = self.get_query_argument("path", default="")
-        name = _package_name(self.get_query_argument("name", default=""))
+    def post(self):
+        path, include, exclude, raw_name = _freeze_request(self)
+        name = _package_name(raw_name)
         if not name:
             self.set_status(400)
             self.set_header("Content-Type", "application/json")
@@ -2273,7 +2572,7 @@ class BundleHandler(APIHandler):
 
         # The snapshot is collected from the directory itself, so the
         # package is refused for the same reasons a freeze would be.
-        snapshot = _freeze_snapshot(self, path)
+        snapshot = _freeze_snapshot(self, path, include, exclude)
         directory = snapshot["directory"]
 
         image = _session_image()

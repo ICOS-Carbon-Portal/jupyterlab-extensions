@@ -30,15 +30,19 @@ or IP override is used — IP geolocation is not tracked.
 
 **Frontend** (`src/freeze.ts`): adds the Freeze button to the shell's top
 area at rank 101 (right of the menu bar) plus the commands
-`icos-freeze:from-current` and `icos-freeze:from-selected`. It GETs
-`/icos-ext/freeze?path=...` for the report and `/icos-ext/bundle?path=...`
-for the handover zip.
+`icos-freeze:from-current` and `icos-freeze:from-selected`. It POSTs
+`{path, include}` to `/icos-ext/freeze` for the report (`include` null
+means the recommended selection) and `{path, name, include}` to
+`/icos-ext/bundle` for the handover zip. The report shows a file tree
+with checkboxes.
 
 **Backend** (`icos_ext/handlers.py`): `FreezeHandler` at
-`GET /icos-ext/freeze` returns the snapshot and, when nothing blocks the
-freeze, writes `Dockerfile`, `.dockerignore` and `icos-freeze.json` beside
-the notebooks. `BundleHandler` at `GET /icos-ext/bundle` serves that
-directory as a zip.
+`POST /icos-ext/freeze` is read-only: it lists the directory recursively
+(files, kind, recommended), analyses only the selected files and returns
+the snapshot. `BundleHandler` at `POST /icos-ext/bundle` writes the build
+context into `.icos-freeze/` (`Dockerfile`, `.dockerignore`,
+`icos-freeze.json` and the selected files at their relative paths) and
+returns the zip.
 
 **Baseline** (`icos_ext/baseline.py`): standard library only, run once
 during the image build as `python -m icos_ext.baseline`. It records what

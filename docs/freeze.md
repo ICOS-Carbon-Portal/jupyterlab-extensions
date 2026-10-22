@@ -22,18 +22,57 @@ While a freeze runs, the screen ices over and stops taking clicks. This
 is normal: the server is reading every package in your environment, which
 takes a few seconds. The ice clears when the report opens.
 
-The report tells you:
+Opening the report writes nothing to disk. The report tells you:
 
+- which files go into the package (see [Choosing files](#choosing-files))
 - version conflicts between your notebooks and your dependency files
-- whether the build files were written to `.icos-freeze/`, or why not
-- a Download package button, once nothing is blocking the freeze, with
-  a Package name field next to it where you make up a name for the
-  package (see [The package name](#the-package-name))
+- whether a Dockerfile can be made, or why not
+- a Package section with three numbered steps: check the selected
+  files and any problems in the report, name the package, and press
+  Download package (see [The package name](#the-package-name))
 - warnings where the image will differ from your session
 - packages your notebooks import that are not installed here
+- notebooks that could not be read, listed as not checked
 - the base image and Python version this session runs on
 - what you installed on top of that image, with versions
 - the dependency files found, and each notebook with its packages
+
+## Choosing files
+
+The Files section shows everything in the folder, subfolders included,
+as a tree with a checkbox per file. Ticked files go into the package at
+the same place they sit in your folder. Some files start ticked:
+
+- every notebook
+- the dependency files at the top of the folder, such as
+  `requirements.txt`
+- your own code that a notebook imports, such as a `scripts/` folder or
+  a `helper.py` next to the notebook
+
+Everything else, such as data files, is listed unticked with its size.
+Tick what the package needs. Reset to recommended puts the starting
+ticks back.
+
+Some things are never listed and never packaged: `.ipynb_checkpoints`,
+`__pycache__`, `.git`, `.virtual_documents`, `.icos-freeze`,
+`.DS_Store`, zips and `.pyc` files. At the top of the folder,
+`Dockerfile`, `.dockerignore`, `docker-compose.yml`, `icos-freeze.json`
+and `README.md` are not listed either, because the package writes its
+own files under those names. The list stops at 5000 files, and the
+report warns when it does.
+
+Changing a tick checks the report again. Only ticked notebooks count for
+missing packages, install cells and version conflicts. If you untick
+your own code that a notebook imports, it shows up as a missing package,
+because the package would no longer hold it.
+
+Your own code is not mistaken for a package to install. An import that
+matches a ticked file or folder of yours is not reported as missing.
+
+Notebooks are read in full up to 100 MB each. A notebook that is larger,
+or that cannot be read, is listed as not checked. It is still copied
+into the package if it is ticked, but its imports and install cells were
+not looked at.
 
 ## requirements.txt is the contract
 
@@ -145,6 +184,8 @@ all slip past it, and it does not care whether the cell was ever run.
 Those installs still break a rebuild. They are simply not caught.
 
 The report lists one line per notebook, naming the packages to move.
+Only ticked notebooks are checked. Unticking a notebook takes it out of
+the package as well.
 
 ## Other reasons a freeze is refused
 
@@ -166,22 +207,22 @@ The package is a zip holding:
 - `docker-compose.yml`: builds and runs it with one command
 - `icos-freeze.json`: what was frozen, and from which image
 - `README.md`: the commands the tester runs
-- your notebooks
-- your dependency files
+- the files you ticked, at the same paths as in your folder
 
-The image that gets built holds only the notebooks and their dependency
-files. The `Dockerfile`, the `.dockerignore`, `docker-compose.yml`,
+The image that gets built holds only the files you ticked. The
+`Dockerfile`, the `.dockerignore`, `docker-compose.yml`,
 `icos-freeze.json`, the README and any zip are all kept out of it: they
 say how the image is built, or record what was frozen, so they mean
 nothing to anything running inside it.
 
 ## Where freeze writes
 
-Freeze leaves your own files alone. Everything it makes goes into a
+Freeze leaves your own files alone, and opening the report writes
+nothing. When you download a package, everything it makes goes into a
 hidden folder, `.icos-freeze/`, inside the directory you froze:
 
 - the `Dockerfile`, `.dockerignore` and `icos-freeze.json`
-- copies of your notebooks and dependency files
+- copies of the files you ticked, at the same paths as in your folder
 - every zip you download, so you can hand one on again later without
   freezing a second time. Downloading again under the same name replaces
   that zip
@@ -193,8 +234,9 @@ straight from it:
 docker build .icos-freeze
 ```
 
-Each freeze refreshes the folder. A notebook you deleted from your
-directory is removed from it too. Zips under other names are kept.
+Each download refreshes the folder. A file you no longer tick, or have
+deleted from your directory, is removed from it too. Saved zips are
+kept.
 
 The file browser does not list folders whose names start with a dot,
 so your directory looks unchanged. To see the folder, open a terminal
@@ -204,9 +246,14 @@ files.
 
 ## The package name
 
-Type a name in the Package name field next to Download package. The
-field starts empty, and you make the name up. The button stays disabled
-until there is a name, and pressing Enter in the field also downloads.
+The Package section of the report walks you through three steps:
+
+1. Check the selected files and any problems in this report.
+2. Name the package: type a name in the field. It starts empty, and you
+   make the name up.
+3. Press Download package. Pressing Enter in the name field does the
+   same.
+
 The name becomes both the zip name, `<name>.zip`, and the Docker image
 tag, `icos-frozen:<name>`, used in the package's compose file and README.
 
@@ -216,6 +263,17 @@ lowercase, anything other than letters, digits and underscores becomes
 
 Neither the zip nor the tag carries a date or time. To keep two builds
 apart, give them different names.
+
+The Download package button stays disabled until the package can be
+made, and a line under it says why: the reason a freeze is blocked, the
+report still updating after a change, or "Type a name to enable the
+download".
+
+After a download, a Next steps note confirms the zip was downloaded and,
+when the copy was saved, that one is also in the folder's
+`.icos-freeze/`. It then tells you to give the zip to the tester, and
+that the `README.md` inside explains how to build and run it. The Close
+button at the bottom only closes the report window.
 
 ## Giving it to a tester
 
