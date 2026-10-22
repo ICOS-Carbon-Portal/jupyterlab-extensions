@@ -36,9 +36,9 @@ steps:
      says "Nothing prevents the package from being created."
    - Warnings follow: packages your notebooks import that are not
      installed here, notebooks that could not be read (listed as not
-     checked), where the image will differ from your session, and
-     packages that are installed but not used (see
-     [The rules](#the-rules)).
+     checked), differences from your environment (where the image will
+     differ from what is installed here), and packages that are
+     installed but not used (see [The rules](#the-rules)).
    - A collapsed Details section holds the rest: the Dockerfile, the
      base image and Python version, what you installed on top of the
      image, the dependency files found, each notebook with its
@@ -95,12 +95,12 @@ not looked at.
 ## requirements.txt is the contract
 
 The `requirements.txt` in the folder you freeze says what goes on top
-of the base image. The base image is the image your session runs on.
+of the base image. The base image is the image your JupyterLab runs on.
 
 The Dockerfile starts from the base image and runs
 `pip install -r requirements.txt`. The image gets exactly the versions
-you pinned. What you happen to have installed in your session does not
-matter to the build.
+you pinned. What you happen to have installed in your environment does
+not matter to the build.
 
 ### The rules
 
@@ -118,15 +118,15 @@ Freeze is blocked until all of these hold:
   - environment markers, such as `; python_version < "3.12"`
 - **Each package appears once.** A package pinned twice is refused.
 - **What you installed and use is listed.** If you installed a package
-  in your session, for example with `pip install` or
+  in your environment, for example with `pip install` or
   `pip install --user`, and a ticked file uses it, that package must be
   in the file. A package counts as used when a ticked notebook imports
   it, a ticked `.py` file imports it anywhere, or an install cell in a
   ticked notebook installs it. Packages it pulled in as dependencies do
   not need a line: pip installs them.
 - **Changed image packages your notebooks use are listed.** If a
-  notebook imports a package the image ships, and your session has a
-  different version, pin it. This happens after something like
+  notebook imports a package the image ships, and your environment has
+  a different version, pin it. This happens after something like
   `pip install -U numpy`.
 
 Packages you installed that no ticked file uses do not block. Step 2
@@ -154,13 +154,13 @@ it. Add numpy==2.4.2 to requirements.txt and freeze again.
 
 Some differences only warn. The freeze still goes ahead:
 
-- a pinned version differs from the one in your session
-- a pinned package is not installed in your session
+- a pinned version differs from the one installed in your environment
+- a pinned package is not installed in your environment
 
 For example:
 
 ```text
-pandas: requirements.txt pins 2.3.1, but your notebooks ran with 3.0.1.
+pandas: requirements.txt pins 2.3.1, but this environment has 3.0.1.
 The image will have 2.3.1.
 ```
 
@@ -335,6 +335,6 @@ docker run --rm <tag> pip list
 ```
 
 `HOW_TO_RUN.md` writes the real image tag, `icos-frozen:<name>`, into that
-command, so it can be pasted as it stands. The tester reads `requirements.txt` from the
-unpacked package on their own machine. Every package in it should be in
-that list, at the version it pins.
+command, so it can be pasted as it stands. The tester reads
+`requirements.txt` from the unpacked package on their own machine. Every
+package in it should be in that list, at the version it pins.

@@ -882,8 +882,8 @@ def _parse_contract(content):
     "invalid": [line, ...], "duplicates": [name, ...]}. Only exact
     "name==version" lines, with optional extras, are pins; every other
     non-blank, non-comment line is invalid, because anything looser
-    would let the rebuilt image resolve to something the notebooks never
-    ran with. A package pinned twice is kept at its first pin.
+    would let the rebuilt image resolve to something the environment
+    never had installed. A package pinned twice is kept at its first pin.
     """
     pins = {}
     invalid = []
@@ -1021,7 +1021,7 @@ def _check_contract(requirements, user_installed, scan, notebooks=(), used=()):
     do not. "unlisted" and "drifted" are computed against no pins at
     all when the file is missing, so the block reason can say what to
     put in it. "warnings" never block: they say where the rebuilt image
-    will differ from what the notebooks ran with.
+    will differ from what is installed in the environment.
     """
     content = next(
         (item["content"] for item in requirements if item["name"] == CONTRACT_NAME),
@@ -1056,8 +1056,8 @@ def _drifted_imports(notebooks, scan, pins):
 
     The top-level check lets a changed image package through when
     something else depends on it, since pip would bring it back; but it
-    comes back at the image's version, not the one the notebooks ran
-    with. Only imports count, not installs (those block on their own)
+    comes back at the image's version, not the one installed in the
+    environment. Only imports count, not installs (those block on their own)
     nor packages pip changed as a side effect. A package
     requirements.txt pins at any version is settled. Empty without a
     baseline, because then the image's versions are unknown.
@@ -1112,7 +1112,7 @@ def _suggest_pin(line, packages):
 
 
 def _contract_warnings(pins, packages):
-    """Return one sentence per pin that differs from the running session.
+    """Return one sentence per pin that differs from the current environment.
 
     Sorted by normalised name. Versions are compared as written, so a
     pin of "1.0" against an installed "1.0.0" is reported too.
@@ -1123,13 +1123,14 @@ def _contract_warnings(pins, packages):
         installed = packages.get(key)
         if installed is None:
             warnings.append(
-                f"{pin['name']}: pinned in {CONTRACT_NAME} but not installed"
-                " here, so the notebooks were not run with it."
+                f"{pin['name']}: {CONTRACT_NAME} pins {pin['version']}, but"
+                " it is not installed in this environment. The image will"
+                f" install {pin['version']}."
             )
         elif installed["version"] != pin["version"]:
             warnings.append(
                 f"{pin['name']}: {CONTRACT_NAME} pins {pin['version']}, but"
-                f" your notebooks ran with {installed['version']}. The image"
+                f" this environment has {installed['version']}. The image"
                 f" will have {pin['version']}."
             )
     return warnings
@@ -1530,7 +1531,7 @@ def _contract_block_reason(contract):
         suggestions = [entry["suggestion"] for entry in invalid[:3]]
         suggestions = [item for item in suggestions if item]
         if suggestions:
-            reason += f" Your session has {_join_names(suggestions)}."
+            reason += f" Your environment has {_join_names(suggestions)}."
         return f"{reason} Fix the file, then freeze again."
 
     duplicates = contract["duplicates"]
@@ -2361,11 +2362,11 @@ def _generate_bundle_readme(directory, tag, manifest, members, snapshot):
     if warnings:
         lines.extend([
             "",
-            "## Differences from the frozen session",
+            "## Differences from the frozen environment",
             "",
             f"The image installs what `{CONTRACT_NAME}` pins, and that is"
-            " not exactly what the notebooks ran with. A result that does"
-            " not reproduce may come from one of these:",
+            " not exactly what was installed in the environment. A result"
+            " that does not reproduce may come from one of these:",
             "",
         ])
         lines.extend(f"- {item}" for item in warnings)

@@ -1042,7 +1042,7 @@ function renderBlocking(
 
 function renderRequirementsWarnings(report: IReport, warnings: string[]): void {
   if (warnings.length > 0) {
-    report.addHeading(`Differences from your session (${warnings.length})`, 'warning');
+    report.addHeading(`Differences from your environment (${warnings.length})`, 'warning');
     report.addList(warnings, 'warning');
   }
 }
@@ -1055,7 +1055,7 @@ function renderUnusedInstalled(report: IReport, packages: IFreezeUnusedPackage[]
       'warning'
     );
     report.addLine(
-      'These are installed in your session, but no selected file imports them, so they are not included. ' +
+      'These are installed in your environment, but no selected file imports them, so they are not included. ' +
         'If the notebooks need one (for example through a !command), add it to requirements.txt as name==version.'
     );
   }
