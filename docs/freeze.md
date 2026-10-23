@@ -18,6 +18,14 @@ directory" and "Freeze from selected directory". The second one asks you
 for a directory path first. They are registered but not listed in the
 command palette yet, so for now the button is the way in.
 
+Freeze uses the files as they are saved on disk. If any open file in
+that directory, or in a folder below it, has unsaved changes, an
+"Unsaved changes" dialog lists those files first. Save and freeze, the
+default, saves them and then opens the report. Freeze saved versions
+carries on without saving, so those changes are not in the package.
+Cancel stops. If a file cannot be saved, nothing is frozen and an error
+names the files. With nothing unsaved, the report opens straight away.
+
 While a freeze runs, the screen ices over and stops taking clicks. This
 is normal: the server is reading every package in your environment, which
 takes a few seconds. The ice clears when the report opens.
@@ -43,8 +51,9 @@ steps:
      base image and Python version, what you installed on top of the
      image, the dependency files found, each notebook with its
      packages, and your local code.
-3. **Create the package.** Name the package and download it (see
-   [The package name](#the-package-name)).
+3. **Create the package.** Choose whether to clear notebook outputs
+   (see [Notebook outputs](#notebook-outputs)), then name the package
+   and download it (see [The package name](#the-package-name)).
 
 ## Choosing files
 
@@ -240,7 +249,9 @@ The package is a zip holding:
 - `docker-compose.yml`: builds and runs it with one command
 - `icos-freeze.json`: what was frozen, and from which image
 - `HOW_TO_RUN.md`: the commands the tester runs
-- the files you ticked, at the same paths as in your folder
+- the files you ticked, at the same paths as in your folder. Notebooks
+  have their outputs cleared unless you unticked that option (see
+  [Notebook outputs](#notebook-outputs))
 
 The image that gets built holds only the files you ticked. The
 `Dockerfile`, the `.dockerignore`, `docker-compose.yml`,
@@ -308,6 +319,28 @@ that the `HOW_TO_RUN.md` inside explains how to build and run it.
 
 The Close button sits below step 3. It only closes the report
 window and does not download anything.
+
+## Notebook outputs
+
+Above the name field, step 3 has a checkbox, Clear notebook outputs in
+the package. It starts ticked and is remembered for each folder, like
+the file ticks. Your own notebooks are not changed.
+
+When it is ticked, the notebook copies in `.icos-freeze/` and in the zip
+lose the outputs and run counters of their code cells, and the saved
+widget state of the notebook. Code and markdown stay. A notebook that
+cannot be read, or is over 100 MB, is copied unchanged.
+
+Clearing makes the package smaller, keeps tokens, paths and data
+previews in outputs from leaking, and makes the tester's run a real
+check. Untick it when the tester should compare their results against
+yours.
+
+`icos-freeze.json` records the choice in `outputs_cleared` and lists
+the notebooks that could not be cleared in `outputs_not_cleared`.
+`HOW_TO_RUN.md` says in one line which it was: the outputs were
+cleared, so the notebooks show no results until they are run, or they
+were kept so the tester can compare.
 
 ## Giving it to a tester
 

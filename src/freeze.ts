@@ -103,6 +103,7 @@ interface IFreezeFolder {
 interface ISavedSelection {
   excluded: string[];
   added: string[];
+  clearOutputs?: boolean;
 }
 
 interface IFileSelection {
@@ -116,6 +117,7 @@ interface IPackageSection {
   node: HTMLDivElement;
   setAvailable: (available: boolean) => void;
   setPending: (pending: boolean) => void;
+  clearOutputs: () => boolean;
 }
 
 interface IDownloadedPackage {
@@ -269,7 +271,12 @@ function activateFreeze(
     );
     const leftOut = createReport();
     const issues = createReport();
-    const packageSection = createPackageSection(path, selection.include);
+    const packageSection = createPackageSection(
+      path,
+      selection.include,
+      saved.clearOutputs !== false,
+      persistSelection
+    );
     container.append(
       createStep(
         '1. Review the selection',
@@ -304,8 +311,15 @@ function activateFreeze(
     let generation = 0;
     let timer: number | undefined;
 
+    function persistSelection(): void {
+      void saveSelection(state, path, {
+        ...selection.saved(),
+        clearOutputs: packageSection.clearOutputs()
+      });
+    }
+
     function onSelectionChange(): void {
-      void saveSelection(state, path, selection.saved());
+      persistSelection();
       generation += 1;
       const current = generation;
       packageSection.setPending(true);
@@ -346,6 +360,63 @@ function activateFreeze(
     window.clearTimeout(timer);
   }
 
+  // The server reads the files from disk, so edits still only in an open
+  // document would be silently left out of the package.
+  async function settleUnsavedChanges(path: string): Promise<boolean> {
+    const unsaved = unsavedDocuments(app, path);
+    if (unsaved.length === 0) {
+      return true;
+    }
+
+    const body = document.createElement('div');
+    const intro = document.createElement('p');
+    intro.textContent = 'These files have changes that are not saved yet:';
+    const list = document.createElement('ul');
+    for (const { relative } of unsaved) {
+      const item = document.createElement('li');
+      item.textContent = relative;
+      list.appendChild(item);
+    }
+    const outro = document.createElement('p');
+    outro.textContent =
+      'Freeze uses the saved files, so these changes would not be included in the package.';
+    body.append(intro, list, outro);
+
+    const freezeSaved = 'Freeze saved versions';
+    const result = await showDialog({
+      title: 'Unsaved changes',
+      body: new Widget({ node: body }),
+      buttons: [
+        Dialog.cancelButton({ label: 'Cancel' }),
+        Dialog.createButton({ label: freezeSaved, accept: false }),
+        Dialog.okButton({ label: 'Save and freeze' })
+      ]
+    });
+    if (result.button.accept) {
+      return saveAll(unsaved);
+    }
+    return result.button.label === freezeSaved;
+  }
+
+  async function saveAll(unsaved: IUnsavedDocument[]): Promise<boolean> {
+    const failed: string[] = [];
+    for (const { relative, context } of unsaved) {
+      try {
+        await context.save();
+      } catch (error) {
+        console.error(`Freeze: could not save ${relative}`, error);
+        failed.push(relative);
+      }
+    }
+    if (failed.length === 0) {
+      return true;
+    }
+    await showFreezeError(
+      `These files could not be saved, so nothing was frozen: ${failed.join(', ')}.`
+    );
+    return false;
+  }
+
   // The button and both palette commands all funnel through here, so a
   // second request cannot start while one is running. The finally is a
   // backstop: a throw would otherwise leave the button on "Freezing...".
@@ -355,9 +426,12 @@ function activateFreeze(
     }
 
     freezeInFlight = true;
-    setFreezeBusy(true);
 
     try {
+      if (!(await settleUnsavedChanges(path))) {
+        return;
+      }
+      setFreezeBusy(true);
       await performSnapshot(path);
     } finally {
       freezeInFlight = false;
@@ -400,6 +474,61 @@ function activateFreeze(
   // ArrayExt.upperBound, so equal ranks land after. Rank 101 puts Freeze
   // right of the menu bar, well ahead of the shell's DEFAULT_RANK of 900.
   app.shell.add(freezeButton, 'top', { rank: 101 });
+}
+
+// Structural, so the extension need not depend on @jupyterlab/docregistry:
+// a DocumentWidget exposes its context, whose localPath drops the drive
+// prefix, matching the file browser's paths.
+interface IDocumentContext {
+  localPath: string;
+  model: { dirty: boolean };
+  save(): Promise<void>;
+}
+
+interface IUnsavedDocument {
+  relative: string;
+  context: IDocumentContext;
+}
+
+function isDocumentContext(value: unknown): value is IDocumentContext {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('localPath' in value) ||
+    !('model' in value) ||
+    !('save' in value)
+  ) {
+    return false;
+  }
+  const model = value.model;
+  return (
+    typeof value.localPath === 'string' &&
+    typeof value.save === 'function' &&
+    typeof model === 'object' &&
+    model !== null &&
+    'dirty' in model &&
+    typeof model.dirty === 'boolean'
+  );
+}
+
+// One file can be open in several widgets that share a context, so the
+// result holds one entry per path.
+function unsavedDocuments(app: JupyterFrontEnd, path: string): IUnsavedDocument[] {
+  const root = path.replace(/^\/+|\/+$/g, '');
+  const prefix = root === '' ? '' : `${root}/`;
+  const found = new Map<string, IUnsavedDocument>();
+  for (const widget of app.shell.widgets('main')) {
+    const context: unknown = 'context' in widget ? widget.context : undefined;
+    if (!isDocumentContext(context) || !context.model.dirty) {
+      continue;
+    }
+    const local = context.localPath;
+    if (!local.startsWith(prefix) || found.has(local)) {
+      continue;
+    }
+    found.set(local, { relative: local.slice(prefix.length), context });
+  }
+  return [...found.values()];
 }
 
 function createFreezeOverlay(): IFreezeOverlay {
@@ -493,7 +622,8 @@ async function loadSelection(state: IStateDB | null, path: string): Promise<ISav
     }
     return {
       excluded: 'excluded' in value ? stringList(value.excluded) : [],
-      added: 'added' in value ? stringList(value.added) : []
+      added: 'added' in value ? stringList(value.added) : [],
+      clearOutputs: !('clearOutputs' in value) || value.clearOutputs !== false
     };
   } catch (error) {
     console.error('Freeze: could not read the saved file selection', error);
@@ -501,8 +631,9 @@ async function loadSelection(state: IStateDB | null, path: string): Promise<ISav
   }
 }
 
-// A selection equal to the recommended one is removed rather than saved,
-// which is also how "Reset to recommended" forgets it.
+// A selection equal to the recommended one, with outputs cleared, is
+// removed rather than saved, which is also how "Reset to recommended"
+// forgets it.
 async function saveSelection(
   state: IStateDB | null,
   path: string,
@@ -513,10 +644,11 @@ async function saveSelection(
   }
   const key = SELECTION_KEY + path;
   try {
-    if (saved.excluded.length === 0 && saved.added.length === 0) {
+    const clearOutputs = saved.clearOutputs !== false;
+    if (saved.excluded.length === 0 && saved.added.length === 0 && clearOutputs) {
       await state.remove(key);
     } else {
-      await state.save(key, { excluded: saved.excluded, added: saved.added });
+      await state.save(key, { excluded: saved.excluded, added: saved.added, clearOutputs });
     }
   } catch (error) {
     console.error('Freeze: could not save the file selection', error);
@@ -1066,8 +1198,25 @@ function renderUnusedInstalled(report: IReport, packages: IFreezeUnusedPackage[]
   }
 }
 
-function createPackageSection(path: string, include: () => string[]): IPackageSection {
+function createPackageSection(
+  path: string,
+  include: () => string[],
+  initialClearOutputs: boolean,
+  onClearOutputsChange: () => void
+): IPackageSection {
   const report = createReport();
+
+  const clearBox = document.createElement('input');
+  clearBox.type = 'checkbox';
+  clearBox.checked = initialClearOutputs;
+
+  const clearLabel = document.createElement('label');
+  clearLabel.className = 'icos-freeze-clear-outputs';
+  clearLabel.append(clearBox, 'Clear notebook outputs in the package');
+
+  const clearNote = document.createElement('div');
+  clearNote.className = 'icos-freeze-package-hint';
+  clearNote.textContent = 'Your own notebooks are not changed.';
 
   const nameInput = document.createElement('input');
   nameInput.type = 'text';
@@ -1099,6 +1248,8 @@ function createPackageSection(path: string, include: () => string[]): IPackageSe
   nextSteps.setAttribute('role', 'status');
   nextSteps.hidden = true;
 
+  report.append(clearLabel);
+  report.append(clearNote);
   report.append(row);
   report.append(hint);
   report.append(packageStatus);
@@ -1116,6 +1267,7 @@ function createPackageSection(path: string, include: () => string[]): IPackageSe
   // the button waits for it rather than package a selection unseen.
   function refresh(): void {
     nameInput.disabled = !available || downloading;
+    clearBox.disabled = downloading;
     packageButton.disabled = !available || pending || downloading || packageName() === '';
 
     if (!available) {
@@ -1131,12 +1283,19 @@ function createPackageSection(path: string, include: () => string[]): IPackageSe
 
   nameInput.addEventListener('input', refresh);
 
+  // The analysis does not depend on it, so no re-check, but a package
+  // already downloaded no longer matches.
+  clearBox.addEventListener('change', () => {
+    nextSteps.hidden = true;
+    onClearOutputsChange();
+  });
+
   // `finally` brings the controls back however the attempt ended.
   const startDownload = (): void => {
     downloading = true;
     nextSteps.hidden = true;
     refresh();
-    void downloadBundle(path, packageName(), include(), setPackageStatus)
+    void downloadBundle(path, packageName(), include(), clearBox.checked, setPackageStatus)
       .then(result => {
         if (result) {
           setPackageStatus('');
@@ -1190,7 +1349,8 @@ function createPackageSection(path: string, include: () => string[]): IPackageSe
         nextSteps.hidden = true;
       }
       refresh();
-    }
+    },
+    clearOutputs: () => clearBox.checked
   };
 }
 
@@ -1198,13 +1358,17 @@ async function downloadBundle(
   path: string,
   name: string,
   include: string[],
+  clearOutputs: boolean,
   setStatus: (text: string, warn?: boolean) => void
 ): Promise<IDownloadedPackage | null> {
   setStatus('Preparing the package.');
 
   const bundleUrl = `${PageConfig.getBaseUrl()}icos-ext/bundle`;
 
-  const response = await freezeRequest(bundleUrl, jsonPost({ path, name, include }));
+  const response = await freezeRequest(
+    bundleUrl,
+    jsonPost({ path, name, include, clear_outputs: clearOutputs })
+  );
   if (!response) {
     setStatus(unreachableMessage('package', path), true);
     return null;

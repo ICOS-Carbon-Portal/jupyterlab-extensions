@@ -1920,7 +1920,7 @@ def _write_dockerignore(directory):
     )
 
 
-def _manifest_document(image, snapshot):
+def _manifest_document(image, snapshot, not_cleared=None):
     """Return the freeze manifest for *snapshot*, ready to serialise.
 
     It records what the directory was frozen from — the base image, the
@@ -1936,6 +1936,9 @@ def _manifest_document(image, snapshot):
     "requirements_warnings" records where the rebuilt image will differ
     from the session the notebooks ran in, which is what a tester needs
     when a result does not reproduce.
+
+    *not_cleared* is None when the notebooks were staged with their
+    outputs, otherwise the notebooks whose outputs could not be cleared.
     """
     return {
         "schema": 1,
@@ -1963,6 +1966,8 @@ def _manifest_document(image, snapshot):
             dict(entry) for entry in snapshot["contract"]["unused_installed"]
         ],
         "requirements_warnings": list(snapshot["contract"]["warnings"]),
+        "outputs_cleared": not_cleared is not None,
+        "outputs_not_cleared": list(not_cleared or []),
     }
 
 
@@ -2039,30 +2044,71 @@ def _has_symlinked_parent(context, parts):
     return False
 
 
-def _stage_build_context(directory, snapshot):
-    """Copy the selected files into FREEZE_DIR_NAME; return the folder.
+def _cleared_notebook(file_path):
+    """Return *file_path* as notebook bytes without outputs, or None.
 
-    Returns None when the folder cannot be created. Files keep their
+    Code cells lose their outputs and execution counts and the notebook
+    its saved widget state; everything else is kept. None means the
+    file is over MAX_NOTEBOOK_BYTES or is not a notebook, and is copied
+    as it is.
+    """
+    with open(file_path, "rb") as handle:
+        raw = handle.read(MAX_NOTEBOOK_BYTES + 1)
+    if len(raw) > MAX_NOTEBOOK_BYTES:
+        return None
+
+    try:
+        # Strict decoding: a replacement character would be written back.
+        document = json.loads(raw.decode("utf-8"))
+    except ValueError as e:
+        log.warning("Freeze: cannot parse %s to clear it: %s", file_path.name, e)
+        return None
+    if not isinstance(document, dict) or not isinstance(document.get("cells"), list):
+        return None
+
+    for cell in document["cells"]:
+        if isinstance(cell, dict) and cell.get("cell_type") == "code":
+            cell["outputs"] = []
+            cell["execution_count"] = None
+    metadata = document.get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop("widgets", None)
+
+    # The layout nbformat writes, so the copy diffs cleanly against a
+    # notebook JupyterLab saved.
+    text = json.dumps(document, indent=1, sort_keys=True, ensure_ascii=False)
+    return (text + "\n").encode("utf-8")
+
+
+def _stage_build_context(directory, snapshot, clear_outputs=False):
+    """Copy the selected files into FREEZE_DIR_NAME; return (folder, not_cleared).
+
+    The folder is None when it cannot be created. Files keep their
     path relative to *directory*. Anything an earlier selection left
     there is removed first, see _remove_stale; saved packages stay, and
     the generated files are rewritten by their own writers. A file that
     cannot be copied is left out, and the package README names only
     what is in the folder.
+
+    With *clear_outputs* the notebooks are written without their
+    outputs, see _cleared_notebook; *not_cleared* lists those copied
+    unchanged instead. The originals in *directory* are only read.
     """
     context = directory / FREEZE_DIR_NAME
     try:
         if context.is_symlink():
             # The writes below would follow it, possibly out of the root.
             log.warning("Freeze: %s is a symlink, not using it", FREEZE_DIR_NAME)
-            return None
+            return None, []
         context.mkdir(exist_ok=True)
     except OSError as e:
         log.warning("Freeze: cannot create %s: %s", FREEZE_DIR_NAME, e)
-        return None
+        return None, []
 
     selected = set(snapshot["include"])
     _remove_stale(context, selected)
 
+    not_cleared = []
     for path in sorted(selected):
         parts = path.split("/")
         target = context.joinpath(*parts)
@@ -2074,14 +2120,23 @@ def _stage_build_context(directory, snapshot):
             # Unlinked first so a symlink in the folder is replaced, not
             # written through.
             target.unlink(missing_ok=True)
-            shutil.copyfile(snapshot["sources"][path], target)
+            source = snapshot["sources"][path]
+            cleared = None
+            if clear_outputs and _is_notebook_file(path):
+                cleared = _cleared_notebook(source)
+                if cleared is None:
+                    not_cleared.append(path)
+            if cleared is None:
+                shutil.copyfile(source, target)
+            else:
+                target.write_bytes(cleared)
         except OSError as e:
             log.warning("Freeze: cannot copy %s: %s", path, e)
 
-    return context
+    return context, not_cleared
 
 
-def _write_build_context(directory, dockerfile, image, snapshot):
+def _write_build_context(directory, dockerfile, image, snapshot, clear_outputs):
     """Stage the whole build context in FREEZE_DIR_NAME; return the outcomes.
 
     {"dockerfile": ..., "dockerignore": ..., "manifest": ...}, each in
@@ -2090,14 +2145,17 @@ def _write_build_context(directory, dockerfile, image, snapshot):
     docker build can be pointed at, and which endpoint the freeze came
     through should not decide what the user ends up holding.
     """
-    context = _stage_build_context(directory, snapshot)
+    context, not_cleared = _stage_build_context(directory, snapshot, clear_outputs)
     if context is None:
         return {"dockerfile": "error", "dockerignore": "error", "manifest": "error"}
 
+    document = _manifest_document(
+        image, snapshot, not_cleared if clear_outputs else None
+    )
     return {
         "dockerfile": _write_dockerfile(context, dockerfile),
         "dockerignore": _write_dockerignore(context),
-        "manifest": _write_manifest(context, _manifest_document(image, snapshot)),
+        "manifest": _write_manifest(context, document),
     }
 
 
@@ -2213,6 +2271,31 @@ def _readme_paths(paths):
     return ", ".join(named) if named else "none"
 
 
+def _outputs_note(manifest):
+    """Return the README line saying whether the notebook outputs were kept."""
+    if not manifest.get("outputs_cleared"):
+        return (
+            "The notebooks keep the outputs they had in the original"
+            " environment, so you can compare your results with them."
+        )
+
+    note = (
+        "The notebook outputs were cleared before packaging, so the"
+        " notebooks show no results until they are run."
+    )
+    kept = [
+        item
+        for item in manifest.get("outputs_not_cleared") or []
+        if isinstance(item, str)
+    ]
+    if kept:
+        note += (
+            " These could not be cleared and keep their original outputs:"
+            f" {_readme_paths(kept)}."
+        )
+    return note
+
+
 def _generate_bundle_readme(directory, tag, manifest, members, snapshot):
     """Return the README shipped in the handover package.
 
@@ -2313,6 +2396,8 @@ def _generate_bundle_readme(directory, tag, manifest, members, snapshot):
         "",
         f"Every package in `{CONTRACT_NAME}` should be in that list, at"
         " the version it pins.",
+        "",
+        _outputs_note(manifest),
         "",
         "## What is in this package",
         "",
@@ -2447,13 +2532,13 @@ def _write_bundle(directory, name, data):
 
 
 def _freeze_request(handler):
-    """Return (path, include, exclude, name) from a freeze request's body.
+    """Return (path, include, exclude, name, clear_outputs) from a request's body.
 
     *include* and *exclude* are each None or a list of strings, and
     nothing more is checked here: _freeze_snapshot only keeps the paths
-    the listing has. A body
-    of any other shape is a 400; get_json_body already answers one for a
-    body that is not JSON at all.
+    the listing has. *clear_outputs* is a bool, True when the body
+    leaves it out or sends null. A body of any other shape is a 400;
+    get_json_body already answers one for a body that is not JSON at all.
     """
     body = handler.get_json_body()
     if not isinstance(body, dict):
@@ -2471,8 +2556,13 @@ def _freeze_request(handler):
             or not all(isinstance(item, str) for item in value)
         ):
             raise web.HTTPError(400, f'"{key}" must be null or a list of paths')
+    clear_outputs = body.get("clear_outputs")
+    if clear_outputs is None:
+        clear_outputs = True
+    elif not isinstance(clear_outputs, bool):
+        raise web.HTTPError(400, '"clear_outputs" must be null or a boolean')
 
-    return path, include, exclude, name
+    return path, include, exclude, name, clear_outputs
 
 
 def _freeze_snapshot(handler, path, include, exclude=None):
@@ -2592,7 +2682,7 @@ class FreezeHandler(APIHandler):
 
     @web.authenticated
     def post(self):
-        path, include, exclude, _ = _freeze_request(self)
+        path, include, exclude, _, _ = _freeze_request(self)
         snapshot = _freeze_snapshot(self, path, include, exclude)
 
         image = _session_image()
@@ -2676,7 +2766,7 @@ class BundleHandler(APIHandler):
 
     @web.authenticated
     def post(self):
-        path, include, exclude, raw_name = _freeze_request(self)
+        path, include, exclude, raw_name, clear_outputs = _freeze_request(self)
         name = _package_name(raw_name)
         if not name:
             self.set_status(400)
@@ -2719,7 +2809,7 @@ class BundleHandler(APIHandler):
         # archive then reads it back, so what the tester unpacks is what
         # FREEZE_DIR_NAME holds.
         context = _write_build_context(
-            directory, dockerfile, image, snapshot
+            directory, dockerfile, image, snapshot, clear_outputs
         )
         if context["dockerfile"] not in DOCKERFILE_ON_DISK:
             # Without a generated Dockerfile on disk the package
